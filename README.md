@@ -2,13 +2,14 @@
 
 Reusable GitHub Actions + script tooling for KiCad release artifact generation.
 
-## Why this repository has no active GitHub workflow
+## Repository model
 
-This repository is intentionally **non-actionable**:
+This repository serves two purposes:
 
-- No active workflow exists at `.github/workflows/` in this repo.
-- Workflow files are stored under `templates/.github/workflows/`.
-- A target KiCad project installs the workflow explicitly using `install.sh`.
+- Distribute reusable workflow/script templates for target KiCad projects.
+- Run module-only CI/release workflows to validate and publish this module.
+
+Module workflows in this repository do not generate production Gerbers for this repository itself. Production Gerber generation runs in each target KiCad project after installation.
 
 ## Contents
 
@@ -37,6 +38,31 @@ If you run `install.sh` again on an existing target project, it performs an upda
 - refreshes the managed workflow/script files to the latest versions from this module
 - preserves your existing `release-artifacts.json` configuration
 
+To remove installed files from a target project while keeping your local config, run:
+
+```bash
+chmod +x uninstall.sh
+./uninstall.sh /path/to/your/kicad-project-repo
+```
+
+## Local pre-release validation
+
+Before creating a target project release tag, run local checks in the target repository:
+
+```bash
+python3 scripts/generate_release_artifacts.py \
+	--config release-artifacts.json \
+	--release 0.0.0 \
+	--dry-run \
+	--no-update-release-variable
+```
+
+Recommended validation sequence:
+
+1. Re-run `install.sh` from the desired module version in this repository.
+2. Run the dry-run command above in the target repository.
+3. If dry-run output is correct, run a non-dry-run execution locally (requires `kicad-cli`) or push a release tag and let CI generate deliverables.
+
 ## Configure in target project
 
 Edit `release-artifacts.json` in the target project:
@@ -53,5 +79,17 @@ For tag `r1.3.1` and project `MyBoard`, workflow output names are:
 
 ## Notes
 
-- CI workflow installs KiCad nightly for newer board formats.
-- Tag-triggered workflows run from the workflow file in the tagged commit.
+- Target project CI installs KiCad nightly for newer board formats.
+- Tag-triggered target workflows run from the workflow file in the tagged commit.
+
+## Module versioning and releases
+
+- Module releases use tags in `module-v#.#.#` format.
+- Target KiCad project releases remain `r#.#.#`.
+- Target projects update manually by checking out/pulling the desired module version, then re-running `install.sh`.
+- Automatic target-repo upgrade bots are intentionally out of scope for now.
+
+## Module repository workflows
+
+- `.github/workflows/module-smoke-test.yml`: validates installer and CLI behavior in non-interactive test scenarios.
+- `.github/workflows/module-release.yml`: publishes module release archives/checksums from `module-v#.#.#` tags.
