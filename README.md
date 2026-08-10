@@ -15,6 +15,7 @@ Module workflows in this repository do not generate production Gerbers for this 
 
 - `templates/.github/workflows/release-gerbers.yml`
 - `scripts/generate_release_artifacts.py`
+- `scripts/check_release_automation_update.py`
 - `examples/release-artifacts.json`
 - `install.sh`
 
@@ -31,7 +32,9 @@ This installs:
 
 - `.github/workflows/release-gerbers.yml`
 - `scripts/generate_release_artifacts.py`
+- `scripts/check_release_automation_update.py`
 - `release-artifacts.json` (only if it does not already exist)
+- `.kicad-release-automation-version.json`
 
 If you run `install.sh` again on an existing target project, it performs an update:
 
@@ -62,6 +65,32 @@ Recommended validation sequence:
 1. Re-run `install.sh` from the desired module version in this repository.
 2. Run the dry-run command above in the target repository.
 3. If dry-run output is correct, run a non-dry-run execution locally (requires `kicad-cli`) or push a release tag and let CI generate deliverables.
+
+## Check for module updates
+
+After installing into a target KiCad repository, you can check whether a newer module release exists:
+
+```bash
+python3 scripts/check_release_automation_update.py
+```
+
+The installer writes `.kicad-release-automation-version.json` into the target repository. The update-check script reads that metadata, queries the latest GitHub release for the module repository, and compares it with the installed version.
+
+Useful options:
+
+- `--repo owner/repo`: override the module repository slug when metadata is missing or you want to check a fork
+- `--metadata path/to/.kicad-release-automation-version.json`: read a non-default metadata file
+- `--json`: emit machine-readable output
+
+Example output:
+
+```text
+Metadata file: /path/to/target/.kicad-release-automation-version.json
+Module repository: owner/kicad-release-automation-module
+Installed version: module-v1.2.0
+Latest release: module-v1.3.0
+Update available: yes
+```
 
 ## Configure in target project
 
@@ -124,6 +153,7 @@ For tag `r1.3.1` and project `MyBoard`, workflow output names are:
 - Module releases use tags in `module-v#.#.#` format.
 - Target KiCad project releases remain `r#.#.#`.
 - Target projects update manually by checking out/pulling the desired module version, then re-running `install.sh`.
+- Target projects can query the latest available module release locally with `scripts/check_release_automation_update.py`.
 - Automatic target-repo upgrade bots are intentionally out of scope for now.
 
 ## Module repository workflows

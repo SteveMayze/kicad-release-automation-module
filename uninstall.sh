@@ -5,7 +5,9 @@ TARGET_DIR="${1:-$PWD}"
 
 WORKFLOW_REL_PATH=".github/workflows/release-gerbers.yml"
 SCRIPT_REL_PATH="scripts/generate_release_artifacts.py"
+UPDATE_CHECK_SCRIPT_REL_PATH="scripts/check_release_automation_update.py"
 CONFIG_REL_PATH="release-artifacts.json"
+METADATA_REL_PATH=".kicad-release-automation-version.json"
 
 if [[ ! -d "$TARGET_DIR" ]]; then
   echo "Target directory does not exist: $TARGET_DIR" >&2
@@ -26,6 +28,20 @@ if [[ -f "$TARGET_DIR/$SCRIPT_REL_PATH" ]]; then
   echo "Removed: $SCRIPT_REL_PATH"
 else
   echo "Not present: $SCRIPT_REL_PATH"
+fi
+
+if [[ -f "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH" ]]; then
+  rm -f "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH"
+  echo "Removed: $UPDATE_CHECK_SCRIPT_REL_PATH"
+else
+  echo "Not present: $UPDATE_CHECK_SCRIPT_REL_PATH"
+fi
+
+if [[ -f "$TARGET_DIR/$METADATA_REL_PATH" ]]; then
+  rm -f "$TARGET_DIR/$METADATA_REL_PATH"
+  echo "Removed: $METADATA_REL_PATH"
+else
+  echo "Not present: $METADATA_REL_PATH"
 fi
 
 if [[ -f "$TARGET_DIR/$CONFIG_REL_PATH" ]]; then

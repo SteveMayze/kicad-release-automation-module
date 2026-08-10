@@ -6,7 +6,79 @@ TARGET_DIR="${1:-$PWD}"
 
 WORKFLOW_REL_PATH=".github/workflows/release-gerbers.yml"
 SCRIPT_REL_PATH="scripts/generate_release_artifacts.py"
+UPDATE_CHECK_SCRIPT_REL_PATH="scripts/check_release_automation_update.py"
 CONFIG_REL_PATH="release-artifacts.json"
+METADATA_REL_PATH=".kicad-release-automation-version.json"
+
+resolve_module_version() {
+  if [[ -n "${KICAD_RELEASE_AUTOMATION_VERSION:-}" ]]; then
+    printf '%s\n' "$KICAD_RELEASE_AUTOMATION_VERSION"
+    return
+  fi
+
+  if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if git -C "$SCRIPT_DIR" describe --tags --exact-match >/dev/null 2>&1; then
+      git -C "$SCRIPT_DIR" describe --tags --exact-match
+      return
+    fi
+
+    git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null || true
+    return
+  fi
+
+  printf '%s\n' "unknown"
+}
+
+resolve_module_repo_url() {
+  if [[ -n "${KICAD_RELEASE_AUTOMATION_REPO_URL:-}" ]]; then
+    printf '%s\n' "$KICAD_RELEASE_AUTOMATION_REPO_URL"
+    return
+  fi
+
+  if git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null || true
+    return
+  fi
+
+  printf '\n'
+}
+
+resolve_module_repo_slug() {
+  if [[ -n "${KICAD_RELEASE_AUTOMATION_REPO:-}" ]]; then
+    printf '%s\n' "$KICAD_RELEASE_AUTOMATION_REPO"
+    return
+  fi
+
+  local repo_url
+  repo_url="$(resolve_module_repo_url)"
+
+  if [[ "$repo_url" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+    printf '%s/%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return
+  fi
+
+  printf '\n'
+}
+
+write_metadata_file() {
+  local module_version
+  local module_repo
+  local module_repo_url
+
+  module_version="$(resolve_module_version)"
+  module_repo="$(resolve_module_repo_slug)"
+  module_repo_url="$(resolve_module_repo_url)"
+
+  cat > "$TARGET_DIR/$METADATA_REL_PATH" <<EOF
+{
+  "module_repo": $(printf '%s' "$module_repo" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+  "module_repo_url": $(printf '%s' "$module_repo_url" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+  "installed_version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+}
+EOF
+
+  echo "Recorded installed module metadata: $METADATA_REL_PATH"
+}
 
 if [[ ! -d "$TARGET_DIR" ]]; then
   echo "Target directory does not exist: $TARGET_DIR" >&2
@@ -31,6 +103,8 @@ cp "$SCRIPT_DIR/templates/.github/workflows/release-gerbers.yml" \
   "$TARGET_DIR/$WORKFLOW_REL_PATH"
 cp "$SCRIPT_DIR/scripts/generate_release_artifacts.py" \
   "$TARGET_DIR/$SCRIPT_REL_PATH"
+cp "$SCRIPT_DIR/scripts/check_release_automation_update.py" \
+  "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH"
 
 if [[ ! -f "$TARGET_DIR/$CONFIG_REL_PATH" ]]; then
   cp "$SCRIPT_DIR/examples/release-artifacts.json" "$TARGET_DIR/$CONFIG_REL_PATH"
@@ -38,6 +112,8 @@ if [[ ! -f "$TARGET_DIR/$CONFIG_REL_PATH" ]]; then
 else
   echo "release-artifacts.json already exists; preserved local configuration."
 fi
+
+write_metadata_file
 
 echo "Installed KiCad release automation into: $TARGET_DIR"
 echo "Next: review release-artifacts.json project.path and commit changes."
