@@ -69,6 +69,43 @@ Edit `release-artifacts.json` in the target project:
 
 - `project.path`: path to the target `.kicad_pro`
 - `gerber.include_layers`: layers to export
+- `gerber.additional_files`: optional extra files copied into the root of the Gerber output directory and ZIP
+
+Example:
+
+```json
+{
+	"project": {
+		"path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
+	},
+	"gerber": {
+		"include_layers": [
+			"F.Cu",
+			"In1.Cu",
+			"In2.Cu",
+			"B.Cu",
+			"F.Paste",
+			"B.Paste",
+			"F.SilkS",
+			"B.SilkS",
+			"F.Mask",
+			"B.Mask",
+			"Edge.Cuts"
+		],
+		"additional_files": [
+			"fab/uv-silkscreen-front.png"
+		]
+	}
+}
+```
+
+`gerber.additional_files` behavior:
+
+- paths may be relative to the repository root or absolute
+- each entry must resolve to an existing regular file
+- files are copied into the Gerber output directory root using their basename
+- two configured files cannot share the same basename, because both would target the same ZIP path
+- in `--dry-run`, the script prints the intended copy operations without copying files
 
 ## Release behavior in target project
 

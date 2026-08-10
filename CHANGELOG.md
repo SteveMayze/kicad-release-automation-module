@@ -7,6 +7,7 @@ The format is inspired by Keep a Changelog, and this project follows semantic ve
 ## [Unreleased]
 
 ### Added
+- Added `gerber.additional_files` config support to copy extra files into the Gerber ZIP root.
 - Added module smoke-test workflow for installer idempotency and local CLI dry-run validation.
 - Added module release workflow for tagged module packaging and published checksums.
 - Added uninstall helper script to remove managed files from target repositories.

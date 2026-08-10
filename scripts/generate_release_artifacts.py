@@ -321,6 +321,75 @@ def validate_configured_layers(config_layers: list[str], available_layers: set[s
     )
 
 
+def get_configured_additional_files(repo_root: Path, config: dict) -> list[Path]:
+    gerber_config = config.get("gerber")
+    if gerber_config is None:
+        return []
+    if not isinstance(gerber_config, dict):
+        fail("Config field 'gerber' must be a JSON object.")
+
+    additional_files = gerber_config.get("additional_files")
+    if additional_files is None:
+        return []
+    if not isinstance(additional_files, list):
+        fail("Config field gerber.additional_files must be a list.")
+
+    resolved_files: list[Path] = []
+    source_by_name: dict[str, Path] = {}
+    for additional_file in additional_files:
+        if not isinstance(additional_file, str) or not additional_file.strip():
+            fail("Each item in gerber.additional_files must be a non-empty string.")
+
+        candidate = Path(additional_file.strip())
+        if not candidate.is_absolute():
+            candidate = repo_root / candidate
+
+        candidate = candidate.resolve()
+        if not candidate.exists():
+            fail(
+                "Configured gerber.additional_files entry does not exist: "
+                f"{additional_file} -> {candidate}"
+            )
+        if not candidate.is_file():
+            fail(
+                "Configured gerber.additional_files entry must be a file: "
+                f"{additional_file} -> {candidate}"
+            )
+
+        file_name = candidate.name
+        previous_source = source_by_name.get(file_name)
+        if previous_source is not None:
+            fail(
+                "Configured gerber.additional_files entries must have unique file "
+                f"names for ZIP packaging: {previous_source} and {candidate}"
+            )
+
+        source_by_name[file_name] = candidate
+        resolved_files.append(candidate)
+
+    return resolved_files
+
+
+def copy_additional_files_to_output(
+    additional_files: list[Path],
+    output_dir: Path,
+    dry_run: bool = False,
+) -> None:
+    for source_file in additional_files:
+        destination_file = output_dir / source_file.name
+        if destination_file.resolve() == source_file.resolve():
+            print(
+                f"Skipping additional file already in output directory: {source_file}"
+            )
+            continue
+
+        print(f"+ copy {source_file} {destination_file}")
+        if dry_run:
+            continue
+
+        shutil.copy2(source_file, destination_file)
+
+
 def run_cmd(command: list[str], cwd: Path, dry_run: bool = False) -> None:
     print(f"+ {' '.join(command)}")
     if dry_run:
@@ -360,6 +429,7 @@ def main() -> None:
         available_layers = parse_board_layers(pcb_file)
         validate_configured_layers(configured_layer_list, available_layers)
     configured_layers = ",".join(configured_layer_list) if configured_layer_list else None
+    additional_files = get_configured_additional_files(repo_root, config)
 
     kicad_cli = resolve_kicad_cli(dry_run=args.dry_run)
     output_dir = (repo_root / args.output_dir).resolve()
@@ -404,6 +474,17 @@ def main() -> None:
         cwd=repo_root,
         dry_run=args.dry_run,
     )
+
+    if additional_files:
+        print(
+            "Including additional file(s) in Gerber output: "
+            + ", ".join(path.name for path in additional_files)
+        )
+        copy_additional_files_to_output(
+            additional_files,
+            output_dir,
+            dry_run=args.dry_run,
+        )
 
     if args.schematic_pdf:
         if not sch_file.exists():
