@@ -32,6 +32,11 @@ This installs:
 - `scripts/generate_release_artifacts.py`
 - `release-artifacts.json` (only if it does not already exist)
 
+If you run `install.sh` again on an existing target project, it performs an update:
+
+- refreshes the managed workflow/script files to the latest versions from this module
+- preserves your existing `release-artifacts.json` configuration
+
 ## Configure in target project
 
 Edit `release-artifacts.json` in the target project:
