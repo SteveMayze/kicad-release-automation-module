@@ -94,6 +94,31 @@ jobs:
           test -f "$TARGET_DIR/.kicad-release-automation-version.json"
           test -f "$TARGET_DIR/scripts/check_release_automation_update.py"
 
+          python3 - "$TARGET_DIR" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          target_dir = Path(sys.argv[1])
+          metadata_path = target_dir / ".kicad-release-automation-version.json"
+          payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+          assert payload["schema_version"] == 2
+          assert payload["installed_version"] == "module-v1.0.0"
+          assert payload["module_version"] == "module-v1.0.0"
+          assert "installed_at" in payload
+
+          managed_files = payload.get("managed_files")
+          assert isinstance(managed_files, dict)
+          assert "scripts/generate_release_artifacts.py" in managed_files
+          assert "scripts/check_release_automation_update.py" in managed_files
+          assert ".github/workflows/release-gerbers.yml" in managed_files
+          for details in managed_files.values():
+            assert isinstance(details, dict)
+            assert isinstance(details.get("sha256"), str) and details["sha256"]
+            assert details.get("version") == "module-v1.0.0"
+          PY
+
       - name: Validate local CLI dry-run behavior
         shell: bash
         run: |
@@ -112,6 +137,37 @@ jobs:
             --config release-artifacts.json \
             --release 1.2.3 \
             --dry-run
+
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+
+          module_path = Path("scripts/generate_release_artifacts.py")
+          spec = importlib.util.spec_from_file_location("release_mod", module_path)
+          mod = importlib.util.module_from_spec(spec)
+          assert spec is not None and spec.loader is not None
+          spec.loader.exec_module(mod)
+
+          assert mod.windows_to_wsl_path(r"D:\\pcbs\\board.kicad_pro") == "/mnt/d/pcbs/board.kicad_pro"
+
+          os.environ["WSL_DISTRO_NAME"] = "UnitTest"
+          converted = mod.normalize_user_path(
+            r"D:\\pcbs\\board.kicad_pro",
+            Path.cwd(),
+            context="unit-test",
+          )
+          assert str(converted) == "/mnt/d/pcbs/board.kicad_pro"
+          assert mod.cli_uses_windows_paths("/mnt/c/Program Files/KiCad/10.99/bin/kicad-cli.exe") is True
+          assert mod.format_path_for_cli(Path("/mnt/d/pcbs/board.kicad_pro"), True) == r"D:\pcbs\board.kicad_pro"
+
+          try:
+            mod.normalize_user_path(r"\\\\server\\share\\board.kicad_pro", Path.cwd(), context="unit-test")
+          except SystemExit:
+            pass
+          else:
+            raise AssertionError("UNC path should fail")
+          PY
 
           popd >/dev/null
 
@@ -178,4 +234,51 @@ jobs:
           assert payload["installed_version"] == "module-v1.0.0"
           assert payload["latest_release"] == "module-v1.3.0"
           assert payload["update_available"] is True
+
+          verify_result = subprocess.run(
+            [
+              sys.executable,
+              str(helper_path),
+              "--metadata",
+              str(metadata_path),
+              "--verify",
+              "--json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+          )
+          verify_payload = json.loads(verify_result.stdout)
+          assert verify_payload["verified"] is True
+          assert verify_payload["valid"] is True
+          assert len(verify_payload["files"]) == 3
+
+          legacy_metadata_path = target_dir / ".kicad-release-automation-version-legacy.json"
+          legacy_metadata_path.write_text(
+            json.dumps(
+              {
+                "module_repo": "example/kicad-release-automation-module",
+                "installed_version": "module-v1.0.0",
+              }
+            ),
+            encoding="utf-8",
+          )
+
+          legacy_result = subprocess.run(
+            [
+              sys.executable,
+              str(helper_path),
+              "--metadata",
+              str(legacy_metadata_path),
+              "--api-base-url",
+              f"http://127.0.0.1:{port}",
+              "--json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+          )
+          legacy_payload = json.loads(legacy_result.stdout)
+          assert legacy_payload["installed_version"] == "module-v1.0.0"
+          assert legacy_payload["update_available"] is True
           PY

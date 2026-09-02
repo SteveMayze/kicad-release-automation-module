@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Optional
 
 TAG_PATTERN = re.compile(r"^r(?P<version>\d+\.\d+\.\d+)$")
+WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
+UNC_PATH_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+[\\/][^\\/]+")
+WSL_MOUNT_DRIVE_PATTERN = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
 DEFAULT_CONFIG_FILE = "release-artifacts.json"
 
 
@@ -93,6 +96,100 @@ def find_repo_root(script_file: Path) -> Path:
     return script_file.resolve().parent.parent
 
 
+def is_wsl_environment() -> bool:
+    if os.name == "nt":
+        return False
+
+    if os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"):
+        return True
+
+    proc_version = Path("/proc/version")
+    if not proc_version.exists():
+        return False
+
+    try:
+        content = proc_version.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+    lowered = content.lower()
+    return "microsoft" in lowered or "wsl" in lowered
+
+
+def windows_to_wsl_path(path_value: str) -> str:
+    drive = path_value[0].lower()
+    remainder = path_value[2:].replace("\\", "/")
+    if not remainder.startswith("/"):
+        remainder = f"/{remainder}"
+    return f"/mnt/{drive}{remainder}"
+
+
+def wsl_to_windows_path(path_value: Path) -> str:
+    posix = path_value.as_posix()
+    match = WSL_MOUNT_DRIVE_PATTERN.match(posix)
+    if not match:
+        fail(
+            "Cannot pass non-/mnt/<drive> paths to Windows kicad-cli.exe from WSL: "
+            f"{path_value}"
+        )
+
+    drive = match.group(1).upper()
+    remainder = match.group(2) or ""
+    if not remainder:
+        return f"{drive}:\\"
+
+    normalized_remainder = remainder.replace("/", "\\")
+    return f"{drive}:\\{normalized_remainder}"
+
+
+def cli_uses_windows_paths(kicad_cli: str) -> bool:
+    if not is_wsl_environment():
+        return False
+
+    cli_text = kicad_cli.strip()
+    if not cli_text:
+        return False
+
+    lower = cli_text.lower()
+    return lower.endswith(".exe") or bool(WINDOWS_DRIVE_PATH_PATTERN.match(cli_text))
+
+
+def format_path_for_cli(path_value: Path, use_windows_paths: bool) -> str:
+    if use_windows_paths:
+        return wsl_to_windows_path(path_value)
+    return str(path_value)
+
+
+def normalize_user_path(raw_path: str, repo_root: Path, context: str) -> Path:
+    path_text = raw_path.strip()
+    if not path_text:
+        fail(f"Path for {context} must be a non-empty string.")
+
+    if UNC_PATH_PATTERN.match(path_text):
+        fail(
+            f"UNC paths are not supported for {context}: {path_text}. "
+            "Mount the network share and use the mounted path instead."
+        )
+
+    if WINDOWS_DRIVE_PATH_PATTERN.match(path_text):
+        if os.name == "nt":
+            candidate = Path(path_text)
+        elif is_wsl_environment():
+            candidate = Path(windows_to_wsl_path(path_text))
+        else:
+            fail(
+                f"Windows-style path is not supported on this platform for {context}: "
+                f"{path_text}"
+            )
+    else:
+        candidate = Path(path_text.replace("\\", "/"))
+
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+
+    return candidate.resolve()
+
+
 def resolve_configured_project_path(repo_root: Path, config: dict) -> Optional[Path]:
     project_config = config.get("project")
     if project_config is None:
@@ -106,13 +203,16 @@ def resolve_configured_project_path(repo_root: Path, config: dict) -> Optional[P
     if not isinstance(configured_path, str) or not configured_path.strip():
         fail("Config field project.path must be a non-empty string.")
 
-    candidate = Path(configured_path)
-    if not candidate.is_absolute():
-        candidate = repo_root / candidate
-
-    candidate = candidate.resolve()
+    candidate = normalize_user_path(
+        configured_path,
+        repo_root,
+        context="config field project.path",
+    )
     if not candidate.exists():
-        fail(f"Configured project.path does not exist: {candidate}")
+        fail(
+            "Configured project.path does not exist: "
+            f"{configured_path} -> {candidate}"
+        )
     if candidate.suffix != ".kicad_pro":
         fail(f"Configured project.path must point to a .kicad_pro file: {candidate}")
 
@@ -125,7 +225,11 @@ def find_project_file(
     configured_project: Optional[Path],
 ) -> Path:
     if explicit_project:
-        project_path = explicit_project.resolve()
+        project_path = normalize_user_path(
+            str(explicit_project),
+            repo_root,
+            context="--project",
+        )
         if not project_path.exists():
             fail(f"Project file not found: {project_path}")
         if project_path.suffix != ".kicad_pro":
@@ -233,9 +337,11 @@ def set_project_release(project_file: Path, release_value: str) -> None:
 
 
 def load_config(repo_root: Path, config_path: Path) -> dict:
-    resolved_path = config_path
-    if not resolved_path.is_absolute():
-        resolved_path = repo_root / resolved_path
+    resolved_path = normalize_user_path(
+        str(config_path),
+        repo_root,
+        context="--config",
+    )
 
     if not resolved_path.exists():
         print(
@@ -340,11 +446,11 @@ def get_configured_additional_files(repo_root: Path, config: dict) -> list[Path]
         if not isinstance(additional_file, str) or not additional_file.strip():
             fail("Each item in gerber.additional_files must be a non-empty string.")
 
-        candidate = Path(additional_file.strip())
-        if not candidate.is_absolute():
-            candidate = repo_root / candidate
-
-        candidate = candidate.resolve()
+        candidate = normalize_user_path(
+            additional_file,
+            repo_root,
+            context="config field gerber.additional_files",
+        )
         if not candidate.exists():
             fail(
                 "Configured gerber.additional_files entry does not exist: "
@@ -432,10 +538,13 @@ def main() -> None:
     additional_files = get_configured_additional_files(repo_root, config)
 
     kicad_cli = resolve_kicad_cli(dry_run=args.dry_run)
+    use_windows_paths = cli_uses_windows_paths(kicad_cli)
     output_dir = (repo_root / args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using kicad-cli: {kicad_cli}")
+    if use_windows_paths:
+        print("Detected Windows kicad-cli under WSL; converting file paths to Windows format.")
     print(f"Project file: {project_file}")
     print(f"PCB file: {pcb_file}")
     print(f"Output directory: {output_dir}")
@@ -446,14 +555,14 @@ def main() -> None:
         "export",
         "gerbers",
         "--output",
-        str(output_dir),
+        format_path_for_cli(output_dir, use_windows_paths),
     ]
     if configured_layers:
         print(f"Using configured Gerber layers: {configured_layers}")
         gerber_command.extend(["--layers", configured_layers])
     else:
         print("No explicit Gerber layers configured. Exporting CLI defaults.")
-    gerber_command.append(str(pcb_file))
+    gerber_command.append(format_path_for_cli(pcb_file, use_windows_paths))
 
     run_cmd(
         gerber_command,
@@ -468,8 +577,8 @@ def main() -> None:
             "export",
             "drill",
             "--output",
-            str(output_dir),
-            str(pcb_file),
+            format_path_for_cli(output_dir, use_windows_paths),
+            format_path_for_cli(pcb_file, use_windows_paths),
         ],
         cwd=repo_root,
         dry_run=args.dry_run,
@@ -496,8 +605,11 @@ def main() -> None:
                 "export",
                 "pdf",
                 "--output",
-                str(output_dir / f"{project_stem}_schematic.pdf"),
-                str(sch_file),
+                format_path_for_cli(
+                    output_dir / f"{project_stem}_schematic.pdf",
+                    use_windows_paths,
+                ),
+                format_path_for_cli(sch_file, use_windows_paths),
             ],
             cwd=repo_root,
             dry_run=args.dry_run,
@@ -511,8 +623,11 @@ def main() -> None:
                 "export",
                 "pdf",
                 "--output",
-                str(output_dir / f"{project_stem}_board.pdf"),
-                str(pcb_file),
+                format_path_for_cli(
+                    output_dir / f"{project_stem}_board.pdf",
+                    use_windows_paths,
+                ),
+                format_path_for_cli(pcb_file, use_windows_paths),
             ],
             cwd=repo_root,
             dry_run=args.dry_run,

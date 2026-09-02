@@ -10,6 +10,29 @@ UPDATE_CHECK_SCRIPT_REL_PATH="scripts/check_release_automation_update.py"
 CONFIG_REL_PATH="release-artifacts.json"
 METADATA_REL_PATH=".kicad-release-automation-version.json"
 
+compute_sha256() {
+  local file_path="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file_path" | awk '{print $1}'
+    return
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file_path" | awk '{print $1}'
+    return
+  fi
+
+  python3 - "$file_path" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+file_path = pathlib.Path(sys.argv[1])
+print(hashlib.sha256(file_path.read_bytes()).hexdigest())
+PY
+}
+
 resolve_module_version() {
   if [[ -n "${KICAD_RELEASE_AUTOMATION_VERSION:-}" ]]; then
     printf '%s\n' "$KICAD_RELEASE_AUTOMATION_VERSION"
@@ -64,16 +87,44 @@ write_metadata_file() {
   local module_version
   local module_repo
   local module_repo_url
+  local installed_at
+  local script_sha
+  local helper_sha
+  local workflow_sha
 
   module_version="$(resolve_module_version)"
   module_repo="$(resolve_module_repo_slug)"
   module_repo_url="$(resolve_module_repo_url)"
+  installed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  script_sha="$(compute_sha256 "$TARGET_DIR/$SCRIPT_REL_PATH")"
+  helper_sha="$(compute_sha256 "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH")"
+  workflow_sha="$(compute_sha256 "$TARGET_DIR/$WORKFLOW_REL_PATH")"
 
   cat > "$TARGET_DIR/$METADATA_REL_PATH" <<EOF
 {
+  "schema_version": 2,
+  "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "module_repo": $(printf '%s' "$module_repo" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
   "module_repo_url": $(printf '%s' "$module_repo_url" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
-  "installed_version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+  "module_version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+  "installed_version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+  "managed_files": {
+    "scripts/generate_release_artifacts.py": {
+      "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "sha256": $(printf '%s' "$script_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    },
+    "scripts/check_release_automation_update.py": {
+      "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "sha256": $(printf '%s' "$helper_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    },
+    ".github/workflows/release-gerbers.yml": {
+      "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "sha256": $(printf '%s' "$workflow_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    }
+  }
 }
 EOF
 

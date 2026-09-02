@@ -80,6 +80,7 @@ Useful options:
 
 - `--repo owner/repo`: override the module repository slug when metadata is missing or you want to check a fork
 - `--metadata path/to/.kicad-release-automation-version.json`: read a non-default metadata file
+- `--verify`: verify managed scripts/workflow versions and SHA256 checksums against installed metadata
 - `--json`: emit machine-readable output
 
 Example output:
@@ -131,6 +132,8 @@ Example:
 `gerber.additional_files` behavior:
 
 - paths may be relative to the repository root or absolute
+- when running under WSL, Windows drive-letter paths (for example `D:\boards\demo.kicad_pro`) are accepted and converted to `/mnt/d/boards/demo.kicad_pro`
+- UNC paths (`\\server\share\...`) are intentionally not supported; mount the share and use the mounted path
 - each entry must resolve to an existing regular file
 - files are copied into the Gerber output directory root using their basename
 - two configured files cannot share the same basename, because both would target the same ZIP path
