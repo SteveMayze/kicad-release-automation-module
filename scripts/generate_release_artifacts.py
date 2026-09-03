@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -96,6 +97,19 @@ def find_repo_root(script_file: Path) -> Path:
     return script_file.resolve().parent.parent
 
 
+def validate_runtime_cwd(repo_root: Path) -> None:
+    runtime_cwd = Path.cwd().resolve()
+    if runtime_cwd == repo_root:
+        return
+
+    fail(
+        "Current working directory does not match repository root derived from "
+        f"script location. cwd={runtime_cwd}, repo_root={repo_root}. "
+        "Run this script from the repository root so relative paths in "
+        "release-artifacts.json resolve predictably."
+    )
+
+
 def is_wsl_environment() -> bool:
     if os.name == "nt":
         return False
@@ -142,6 +156,38 @@ def wsl_to_windows_path(path_value: Path) -> str:
     return f"{drive}:\\{normalized_remainder}"
 
 
+def wsl_mount_text_to_windows_path(path_value: str) -> Optional[str]:
+    normalized = path_value.replace("\\", "/")
+    match = WSL_MOUNT_DRIVE_PATTERN.match(normalized)
+    if not match:
+        return None
+
+    drive = match.group(1).upper()
+    remainder = match.group(2) or ""
+    if not remainder:
+        return f"{drive}:\\"
+
+    normalized_remainder = remainder.replace("/", "\\")
+    return f"{drive}:\\{normalized_remainder}"
+
+
+def wsl_to_windows_cli_path(path_value: Path) -> str:
+    path_text = str(path_value)
+    wslpath_cmd = shutil.which("wslpath")
+    if wslpath_cmd:
+        result = subprocess.run(
+            [wslpath_cmd, "-w", path_text],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        converted = result.stdout.strip()
+        if result.returncode == 0 and converted:
+            return converted
+
+    return wsl_to_windows_path(path_value)
+
+
 def cli_uses_windows_paths(kicad_cli: str) -> bool:
     if not is_wsl_environment():
         return False
@@ -156,12 +202,41 @@ def cli_uses_windows_paths(kicad_cli: str) -> bool:
 
 def format_path_for_cli(path_value: Path, use_windows_paths: bool) -> str:
     if use_windows_paths:
-        return wsl_to_windows_path(path_value)
+        if is_wsl_environment():
+            return wsl_to_windows_cli_path(path_value)
+        return str(path_value)
     return str(path_value)
 
 
+def format_cli_executable_for_windows_shell(kicad_cli: str) -> str:
+    cli_text = kicad_cli.strip()
+    if WINDOWS_DRIVE_PATH_PATTERN.match(cli_text):
+        return cli_text
+
+    if is_wsl_environment() and cli_text.lower().endswith(".exe") and cli_text.startswith("/"):
+        return wsl_to_windows_cli_path(Path(cli_text))
+
+    return cli_text
+
+
+def build_cmd_exe_wrapper(command: list[str], windows_cwd: Optional[str] = None) -> list[str]:
+    if not command:
+        fail("Internal error: empty command cannot be wrapped for cmd.exe")
+
+    windows_command = list(command)
+    windows_command[0] = format_cli_executable_for_windows_shell(windows_command[0])
+    cmdline = subprocess.list2cmdline(windows_command)
+
+    if windows_cwd:
+        windows_cwd_quoted = subprocess.list2cmdline([windows_cwd])
+        cmdline = f"cd /d {windows_cwd_quoted} && {cmdline}"
+
+    # Wrap once more so cmd.exe /c receives one command string in canonical form.
+    return ["cmd.exe", "/d", "/c", f'"{cmdline}"']
+
+
 def normalize_user_path(raw_path: str, repo_root: Path, context: str) -> Path:
-    path_text = raw_path.strip()
+    path_text = os.path.expandvars(os.path.expanduser(raw_path.strip()))
     if not path_text:
         fail(f"Path for {context} must be a non-empty string.")
 
@@ -182,7 +257,11 @@ def normalize_user_path(raw_path: str, repo_root: Path, context: str) -> Path:
                 f"{path_text}"
             )
     else:
-        candidate = Path(path_text.replace("\\", "/"))
+        if os.name == "nt":
+            converted_wsl_mount = wsl_mount_text_to_windows_path(path_text)
+            candidate = Path(converted_wsl_mount or path_text)
+        else:
+            candidate = Path(path_text.replace("\\", "/"))
 
     if not candidate.is_absolute():
         candidate = repo_root / candidate
@@ -497,19 +576,197 @@ def copy_additional_files_to_output(
 
 
 def run_cmd(command: list[str], cwd: Path, dry_run: bool = False) -> None:
-    print(f"+ {' '.join(command)}")
+    pretty_command = " ".join(shlex.quote(arg) for arg in command)
+    print(f"+ {pretty_command}")
     if dry_run:
         return
 
-    result = subprocess.run(command, cwd=str(cwd), check=False)
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(
+            result.stderr,
+            file=sys.stderr,
+            end="" if result.stderr.endswith("\n") else "\n",
+        )
     if result.returncode != 0:
-        fail(f"Command failed with exit code {result.returncode}: {' '.join(command)}")
+        fail(f"Command failed with exit code {result.returncode}: {pretty_command}")
+
+
+def probe_windows_kicad_cli_under_wsl(kicad_cli: str, cwd: Path, dry_run: bool) -> bool:
+    command = [kicad_cli, "--version"]
+    pretty_command = " ".join(shlex.quote(arg) for arg in command)
+    print("Running kicad-cli probe (--version) in Windows-mode context.")
+    print(f"+ {pretty_command}")
+    print(f"  cwd={cwd}")
+    if dry_run:
+        return True
+
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print(
+            result.stderr,
+            file=sys.stderr,
+            end="" if result.stderr.endswith("\n") else "\n",
+        )
+
+    if result.returncode == 0:
+        print("kicad-cli probe succeeded.")
+        return True
+
+    print(
+        "kicad-cli probe failed under direct WSL interop; "
+        "falling back to cmd.exe invocation mode.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def run_cmd_with_optional_fallback(
+    primary_command: list[str],
+    fallback_command: Optional[list[str]],
+    cmd_exe_fallback_command: Optional[list[str]],
+    primary_cwd: str,
+    fallback_cwd: str,
+    dry_run: bool = False,
+) -> None:
+    pretty_primary = " ".join(shlex.quote(arg) for arg in primary_command)
+    print(f"+ {pretty_primary}")
+    print(f"  cwd={primary_cwd}")
+    if dry_run:
+        return
+
+    primary_result = subprocess.run(
+        primary_command,
+        cwd=primary_cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if primary_result.stdout:
+        print(
+            primary_result.stdout,
+            end="" if primary_result.stdout.endswith("\n") else "\n",
+        )
+    if primary_result.stderr:
+        print(
+            primary_result.stderr,
+            file=sys.stderr,
+            end="" if primary_result.stderr.endswith("\n") else "\n",
+        )
+
+    if primary_result.returncode == 0:
+        return
+
+    if fallback_command is None:
+        fail(
+            f"Command failed with exit code {primary_result.returncode}: "
+            f"{pretty_primary}"
+        )
+
+    pretty_fallback = " ".join(shlex.quote(arg) for arg in fallback_command)
+    print(
+        "Primary command failed under WSL Windows-path mode; "
+        "retrying with native POSIX paths."
+    )
+    print(f"+ {pretty_fallback}")
+    print(f"  cwd={fallback_cwd}")
+
+    fallback_result = subprocess.run(
+        fallback_command,
+        cwd=fallback_cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if fallback_result.stdout:
+        print(
+            fallback_result.stdout,
+            end="" if fallback_result.stdout.endswith("\n") else "\n",
+        )
+    if fallback_result.stderr:
+        print(
+            fallback_result.stderr,
+            file=sys.stderr,
+            end="" if fallback_result.stderr.endswith("\n") else "\n",
+        )
+
+    if fallback_result.returncode != 0:
+        if cmd_exe_fallback_command is not None:
+            pretty_cmd_exe_fallback = " ".join(
+                shlex.quote(arg) for arg in cmd_exe_fallback_command
+            )
+            print(
+                "Fallback with native POSIX paths also failed; "
+                "retrying through cmd.exe interop."
+            )
+            print(f"+ {pretty_cmd_exe_fallback}")
+            print(f"  cwd={fallback_cwd}")
+
+            cmd_exe_result = subprocess.run(
+                cmd_exe_fallback_command,
+                cwd=fallback_cwd,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if cmd_exe_result.stdout:
+                print(
+                    cmd_exe_result.stdout,
+                    end="" if cmd_exe_result.stdout.endswith("\n") else "\n",
+                )
+            if cmd_exe_result.stderr:
+                print(
+                    cmd_exe_result.stderr,
+                    file=sys.stderr,
+                    end="" if cmd_exe_result.stderr.endswith("\n") else "\n",
+                )
+            if cmd_exe_result.returncode == 0:
+                print("Fallback through cmd.exe interop succeeded.")
+                return
+
+        if (
+            not primary_result.stdout
+            and not primary_result.stderr
+            and not fallback_result.stdout
+            and not fallback_result.stderr
+        ):
+            print(
+                "KiCad CLI produced no stdout/stderr in either mode; "
+                "this usually indicates process startup/environment issues "
+                "rather than argument content.",
+                file=sys.stderr,
+            )
+        fail(
+            "Command failed after both path modes. "
+            f"Primary exit={primary_result.returncode}, "
+            f"fallback exit={fallback_result.returncode}. "
+            f"Primary: {pretty_primary}; fallback: {pretty_fallback}"
+        )
+
+    print("Fallback with native POSIX paths succeeded.")
 
 
 def main() -> None:
     args = parse_args()
     script_file = Path(__file__)
     repo_root = find_repo_root(script_file)
+    validate_runtime_cwd(repo_root)
 
     config = load_config(repo_root, args.config)
     configured_project = resolve_configured_project_path(repo_root, config)
@@ -539,7 +796,11 @@ def main() -> None:
 
     kicad_cli = resolve_kicad_cli(dry_run=args.dry_run)
     use_windows_paths = cli_uses_windows_paths(kicad_cli)
-    output_dir = (repo_root / args.output_dir).resolve()
+    output_dir = normalize_user_path(
+        str(args.output_dir),
+        repo_root,
+        context="--output-dir",
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using kicad-cli: {kicad_cli}")
@@ -548,6 +809,20 @@ def main() -> None:
     print(f"Project file: {project_file}")
     print(f"PCB file: {pcb_file}")
     print(f"Output directory: {output_dir}")
+
+    primary_cwd = str(repo_root)
+    fallback_cwd = str(repo_root)
+    force_cmd_exe_mode = False
+    windows_repo_root: Optional[str] = None
+    if use_windows_paths and is_wsl_environment():
+        windows_repo_root = wsl_to_windows_cli_path(repo_root)
+        force_cmd_exe_mode = not probe_windows_kicad_cli_under_wsl(
+            kicad_cli,
+            cwd=repo_root,
+            dry_run=args.dry_run,
+        )
+        if force_cmd_exe_mode:
+            print("Using cmd.exe interop mode for all KiCad CLI commands.")
 
     gerber_command = [
         kicad_cli,
@@ -563,24 +838,69 @@ def main() -> None:
     else:
         print("No explicit Gerber layers configured. Exporting CLI defaults.")
     gerber_command.append(format_path_for_cli(pcb_file, use_windows_paths))
+    gerber_fallback_command: Optional[list[str]] = None
+    gerber_cmd_exe_fallback_command: Optional[list[str]] = None
+    drill_command = [
+        kicad_cli,
+        "pcb",
+        "export",
+        "drill",
+        "--output",
+        format_path_for_cli(output_dir, use_windows_paths),
+        format_path_for_cli(pcb_file, use_windows_paths),
+    ]
+    drill_fallback_command: Optional[list[str]] = None
+    drill_cmd_exe_fallback_command: Optional[list[str]] = None
 
-    run_cmd(
-        gerber_command,
-        cwd=repo_root,
-        dry_run=args.dry_run,
-    )
+    if force_cmd_exe_mode:
+        gerber_command = build_cmd_exe_wrapper(gerber_command, windows_repo_root)
+        drill_command = build_cmd_exe_wrapper(drill_command, windows_repo_root)
+    elif use_windows_paths and is_wsl_environment():
+        gerber_fallback_command = [
+            kicad_cli,
+            "pcb",
+            "export",
+            "gerbers",
+            "--output",
+            str(output_dir),
+        ]
+        if configured_layers:
+            gerber_fallback_command.extend(["--layers", configured_layers])
+        gerber_fallback_command.append(str(pcb_file))
+        gerber_cmd_exe_fallback_command = build_cmd_exe_wrapper(
+            gerber_command,
+            windows_repo_root,
+        )
 
-    run_cmd(
-        [
+        drill_fallback_command = [
             kicad_cli,
             "pcb",
             "export",
             "drill",
             "--output",
-            format_path_for_cli(output_dir, use_windows_paths),
-            format_path_for_cli(pcb_file, use_windows_paths),
-        ],
-        cwd=repo_root,
+            str(output_dir),
+            str(pcb_file),
+        ]
+        drill_cmd_exe_fallback_command = build_cmd_exe_wrapper(
+            drill_command,
+            windows_repo_root,
+        )
+
+    run_cmd_with_optional_fallback(
+        primary_command=gerber_command,
+        fallback_command=gerber_fallback_command,
+        cmd_exe_fallback_command=None if force_cmd_exe_mode else gerber_cmd_exe_fallback_command,
+        primary_cwd=primary_cwd,
+        fallback_cwd=fallback_cwd,
+        dry_run=args.dry_run,
+    )
+
+    run_cmd_with_optional_fallback(
+        primary_command=drill_command,
+        fallback_command=drill_fallback_command,
+        cmd_exe_fallback_command=None if force_cmd_exe_mode else drill_cmd_exe_fallback_command,
+        primary_cwd=primary_cwd,
+        fallback_cwd=fallback_cwd,
         dry_run=args.dry_run,
     )
 
@@ -598,38 +918,90 @@ def main() -> None:
     if args.schematic_pdf:
         if not sch_file.exists():
             fail(f"Schematic file not found: {sch_file}")
-        run_cmd(
-            [
+        schematic_command = [
+            kicad_cli,
+            "sch",
+            "export",
+            "pdf",
+            "--output",
+            format_path_for_cli(
+                output_dir / f"{project_stem}_schematic.pdf",
+                use_windows_paths,
+            ),
+            format_path_for_cli(sch_file, use_windows_paths),
+        ]
+        schematic_fallback_command: Optional[list[str]] = None
+        schematic_cmd_exe_fallback_command: Optional[list[str]] = None
+        if force_cmd_exe_mode:
+            schematic_command = build_cmd_exe_wrapper(
+                schematic_command,
+                windows_repo_root,
+            )
+        elif use_windows_paths and is_wsl_environment():
+            schematic_fallback_command = [
                 kicad_cli,
                 "sch",
                 "export",
                 "pdf",
                 "--output",
-                format_path_for_cli(
-                    output_dir / f"{project_stem}_schematic.pdf",
-                    use_windows_paths,
-                ),
-                format_path_for_cli(sch_file, use_windows_paths),
-            ],
-            cwd=repo_root,
+                str(output_dir / f"{project_stem}_schematic.pdf"),
+                str(sch_file),
+            ]
+            schematic_cmd_exe_fallback_command = build_cmd_exe_wrapper(
+                schematic_command,
+                windows_repo_root,
+            )
+
+        run_cmd_with_optional_fallback(
+            primary_command=schematic_command,
+            fallback_command=schematic_fallback_command,
+            cmd_exe_fallback_command=None if force_cmd_exe_mode else schematic_cmd_exe_fallback_command,
+            primary_cwd=primary_cwd,
+            fallback_cwd=fallback_cwd,
             dry_run=args.dry_run,
         )
 
     if args.board_pdf:
-        run_cmd(
-            [
+        board_command = [
+            kicad_cli,
+            "pcb",
+            "export",
+            "pdf",
+            "--output",
+            format_path_for_cli(
+                output_dir / f"{project_stem}_board.pdf",
+                use_windows_paths,
+            ),
+            format_path_for_cli(pcb_file, use_windows_paths),
+        ]
+        board_fallback_command: Optional[list[str]] = None
+        board_cmd_exe_fallback_command: Optional[list[str]] = None
+        if force_cmd_exe_mode:
+            board_command = build_cmd_exe_wrapper(
+                board_command,
+                windows_repo_root,
+            )
+        elif use_windows_paths and is_wsl_environment():
+            board_fallback_command = [
                 kicad_cli,
                 "pcb",
                 "export",
                 "pdf",
                 "--output",
-                format_path_for_cli(
-                    output_dir / f"{project_stem}_board.pdf",
-                    use_windows_paths,
-                ),
-                format_path_for_cli(pcb_file, use_windows_paths),
-            ],
-            cwd=repo_root,
+                str(output_dir / f"{project_stem}_board.pdf"),
+                str(pcb_file),
+            ]
+            board_cmd_exe_fallback_command = build_cmd_exe_wrapper(
+                board_command,
+                windows_repo_root,
+            )
+
+        run_cmd_with_optional_fallback(
+            primary_command=board_command,
+            fallback_command=board_fallback_command,
+            cmd_exe_fallback_command=None if force_cmd_exe_mode else board_cmd_exe_fallback_command,
+            primary_cwd=primary_cwd,
+            fallback_cwd=fallback_cwd,
             dry_run=args.dry_run,
         )
 
