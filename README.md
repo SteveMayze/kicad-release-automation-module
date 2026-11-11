@@ -130,11 +130,16 @@ Edit `release-artifacts.json` in the target project:
   - `projects[]`: list of projects with `id` and `path`
   - `defaults.gerber`: shared Gerber config applied to each project unless overridden
   - `projects[].gerber`: per-project Gerber overrides
+- Optional, both modes:
+  - `kicad.image`: KiCad container image the release workflow uses for `kicad-cli`. Overrides the workflow default (`KICAD_IMAGE`, `kicad/kicad:10.0`) and survives reinstall because it lives in your config. Remove the `kicad` block to follow the module default. The image's KiCad major version must not be older than the version your boards were saved with.
 
 Example:
 
 ```json
 {
+  "kicad": {
+    "image": "kicad/kicad:10.0"
+  },
   "defaults": {
     "gerber": {
       "include_layers": [
@@ -181,6 +186,14 @@ Example:
 - two configured files cannot share the same basename, because both would target the same ZIP path
 - in `--dry-run`, the script prints the intended copy operations without copying files
 
+`--dry-run` never modifies a `.kicad_pro` file, creates directories or writes the manifest.
+
+## Release manifest
+
+After a successful (non-dry-run) run, `generate_release_artifacts.py` writes a manifest JSON listing what that run generated: per project the `id`, `project_file`, `output_dir` and `release` value (paths are relative to the repository root). It is written to `<output-dir>/release-manifest.json` unless `--manifest <path>` is given. The release workflow packages ZIPs from this manifest only.
+
+Before exporting, the script compares the KiCad version each selected board was saved with (`generator_version` in the `.kicad_pcb`) with `kicad-cli --version` and stops if the CLI is older than the board.
+
 ## Release behavior in target project
 
 Tag conventions:
@@ -188,13 +201,15 @@ Tag conventions:
 - Legacy single-project release tag: `r#.#.#` (example: `r1.3.1`)
 - Targeted multi-project release tag: `r/<project-id>/#.#.#` (example: `r/board-a/1.3.1`)
 - Manual runs can also use `workflow_dispatch` input `project_ids` (comma-separated).
+- Manual runs with `workflow_dispatch` input `dry_run` enabled build the ZIPs and upload them as a workflow artifact, but do not publish a GitHub Release.
 
 Behavior:
 
 - Plain `r#.#.#` tags are valid only for legacy single-project config (`project.path`).
 - Multi-project config must use targeted tag format or workflow_dispatch `project_ids`.
 - Each selected project produces a ZIP named `<project-id>-gerber-r#.#.#.zip`.
-- In multi-project mode, each project exports into its own output folder under `gerber/<project-id>/`.
+- The workflow generates into a clean `.release-out/` directory in the workspace and packages only what that run generated. A committed `gerber/` directory is not read and never ends up in a release ZIP.
+- For local runs the default output directory is still `gerber/`; in multi-project mode each project exports into `gerber/<project-id>/`.
 
 ## Notes
 

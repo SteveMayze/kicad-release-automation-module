@@ -129,6 +129,8 @@ jobs:
           TARGET_DIR="$RUNNER_TEMP/kicad-target"
           pushd "$TARGET_DIR" >/dev/null
 
+          cp hardware/demo.kicad_pro "$RUNNER_TEMP/demo.kicad_pro.before"
+
           python3 scripts/generate_release_artifacts.py \
             --config release-artifacts.json \
             --tag r1.2.3 \
@@ -139,6 +141,10 @@ jobs:
             --config release-artifacts.json \
             --release 1.2.3 \
             --dry-run
+
+          # --dry-run must not modify project files or create output directories.
+          cmp hardware/demo.kicad_pro "$RUNNER_TEMP/demo.kicad_pro.before"
+          test ! -e gerber
 
           cp hardware/demo.kicad_pro hardware/demo-aux.kicad_pro
           cp hardware/demo.kicad_pcb hardware/demo-aux.kicad_pcb
@@ -186,6 +192,10 @@ jobs:
             --release demo-aux/1.2.3 \
             --dry-run
 
+          cmp hardware/demo.kicad_pro "$RUNNER_TEMP/demo.kicad_pro.before"
+          cmp hardware/demo-aux.kicad_pro "$RUNNER_TEMP/demo.kicad_pro.before"
+          test ! -e gerber
+
           python3 - <<'PY'
           import importlib.util
           import os
@@ -216,6 +226,130 @@ jobs:
           else:
             raise AssertionError("UNC path should fail")
           PY
+
+          popd >/dev/null
+
+      - name: Validate manifest and version preflight with a stub kicad-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_DIR="$RUNNER_TEMP/kicad-target"
+          STUB_DIR="$RUNNER_TEMP/stub-kicad"
+          mkdir -p "$STUB_DIR"
+
+          # Stand-in for kicad-cli: answers --version and drops one marker file into
+          # the --output directory for each export command.
+          cat > "$STUB_DIR/kicad-cli" <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "${STUB_KICAD_VERSION:-10.0.0}"
+            exit 0
+          fi
+          KIND="${3:-unknown}"
+          OUT=""
+          while [[ $# -gt 0 ]]; do
+            if [[ "$1" == "--output" ]]; then
+              OUT="$2"
+            fi
+            shift
+          done
+          touch "$OUT/stub-$KIND.txt"
+          SH
+          chmod +x "$STUB_DIR/kicad-cli"
+          export KICAD_CLI="$STUB_DIR/kicad-cli"
+
+          pushd "$TARGET_DIR" >/dev/null
+
+          # Selective multi-project run with an explicit manifest path.
+          python3 scripts/generate_release_artifacts.py \
+            --config release-artifacts-multi.json \
+            --release 1.2.3 \
+            --project-id demo-aux \
+            --output-dir .release-out/gerber \
+            --manifest .release-out/release-manifest.json
+
+          test -f .release-out/gerber/demo-aux/stub-gerbers.txt
+          test -f .release-out/gerber/demo-aux/stub-drill.txt
+          test ! -e .release-out/gerber/demo-main
+          test ! -e gerber
+
+          # Legacy single-project run with the default manifest location.
+          python3 scripts/generate_release_artifacts.py \
+            --config release-artifacts.json \
+            --release 1.2.3 \
+            --output-dir .release-out/legacy
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path(".release-out/release-manifest.json").read_text(encoding="utf-8"))
+          assert manifest["schema_version"] == 1
+          assert manifest["release"] == "1.2.3"
+          assert manifest["projects"] == [
+            {
+              "id": "demo-aux",
+              "project_file": "hardware/demo-aux.kicad_pro",
+              "output_dir": ".release-out/gerber/demo-aux",
+              "release": "1.2.3",
+            }
+          ], manifest["projects"]
+
+          legacy = json.loads(Path(".release-out/legacy/release-manifest.json").read_text(encoding="utf-8"))
+          assert legacy["projects"] == [
+            {
+              "id": "demo",
+              "project_file": "hardware/demo.kicad_pro",
+              "output_dir": ".release-out/legacy",
+              "release": "1.2.3",
+            }
+          ], legacy["projects"]
+
+          for name in ("demo", "demo-aux"):
+            project = json.loads(Path(f"hardware/{name}.kicad_pro").read_text(encoding="utf-8"))
+            assert project["text_variables"]["RELEASE"] == "1.2.3"
+          PY
+
+          # Version preflight: a board saved by KiCad 10 must be rejected by an older CLI.
+          cp hardware/demo.kicad_pro hardware/demo-v10.kicad_pro
+          sed 's/(generator "module-smoke-test")/(generator "module-smoke-test")\n  (generator_version "10.0")/' \
+            hardware/demo.kicad_pcb > hardware/demo-v10.kicad_pcb
+          grep -q 'generator_version "10.0"' hardware/demo-v10.kicad_pcb
+
+          if STUB_KICAD_VERSION="9.0.1" KICAD_IMAGE="example/kicad:9.0" \
+            python3 scripts/generate_release_artifacts.py \
+              --config release-artifacts.json \
+              --project hardware/demo-v10.kicad_pro \
+              --release 1.2.3 \
+              --output-dir .release-out/v10 2> "$RUNNER_TEMP/preflight.err"; then
+            echo "Expected the version preflight to fail for an older kicad-cli." >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/preflight.err"
+          grep -q 'demo-v10.kicad_pcb' "$RUNNER_TEMP/preflight.err"
+          grep -q 'saved by KiCad 10.0' "$RUNNER_TEMP/preflight.err"
+          grep -q 'kicad-cli is version 9.0.1' "$RUNNER_TEMP/preflight.err"
+          grep -q 'KICAD_IMAGE (currently: example/kicad:9.0)' "$RUNNER_TEMP/preflight.err"
+          test ! -e .release-out/v10
+
+          STUB_KICAD_VERSION="10.0.8" \
+            python3 scripts/generate_release_artifacts.py \
+              --config release-artifacts.json \
+              --project hardware/demo-v10.kicad_pro \
+              --release 1.2.3 \
+              --output-dir .release-out/v10
+          test -f .release-out/v10/release-manifest.json
+
+          # In --dry-run without any kicad-cli the check is skipped.
+          env -u KICAD_CLI PATH="/usr/bin:/bin" \
+            python3 scripts/generate_release_artifacts.py \
+              --config release-artifacts.json \
+              --project hardware/demo-v10.kicad_pro \
+              --release 1.2.3 \
+              --dry-run > "$RUNNER_TEMP/preflight-dry-run.out"
+          grep -q 'Skipping board/kicad-cli version check' "$RUNNER_TEMP/preflight-dry-run.out"
 
           popd >/dev/null
 
