@@ -42,10 +42,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kicad-cli runs from the official KiCad container image through a small
-          # shim, so the job itself stays on the hosted runner. The workspace is
-          # mounted at the same absolute path inside the container, which keeps the
-          # absolute paths passed by generate_release_artifacts.py valid.
+          # kicad-cli runs from the official KiCad container image through a shim
+          # created by scripts/setup_kicad_cli_container.sh, so the job itself stays
+          # on the hosted runner. The workspace is mounted at the same absolute path
+          # inside the container, which keeps the absolute paths passed by
+          # generate_release_artifacts.py valid.
 
           # Optional per-target override: "kicad": {"image": "..."} in
           # release-artifacts.json replaces the default KICAD_IMAGE.
@@ -76,70 +77,10 @@ jobs:
           fi
           echo "KiCad image: $KICAD_IMAGE"
 
-          PULLED=0
-          for ATTEMPT in 1 2 3; do
-            if docker pull "$KICAD_IMAGE"; then
-              PULLED=1
-              break
-            fi
-            if [[ "$ATTEMPT" -lt 3 ]]; then
-              DELAY=$((ATTEMPT * 15))
-              echo "docker pull attempt $ATTEMPT failed; retrying in ${DELAY}s" >&2
-              sleep "$DELAY"
-            fi
-          done
-          if [[ "$PULLED" -ne 1 ]]; then
-            echo "Could not pull KiCad image '$KICAD_IMAGE' after 3 attempts." >&2
-            exit 1
-          fi
+          SHIM="$(bash scripts/setup_kicad_cli_container.sh "$KICAD_IMAGE" "$RUNNER_TEMP/kicad-bin")"
 
-          # Diagnostic: an entrypoint other than null would receive "kicad-cli" as
-          # an argument instead of running it.
-          echo "Image entrypoint/cmd:"
-          docker inspect --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' "$KICAD_IMAGE"
-
-          KICAD_HOME="$RUNNER_TEMP/kicad-home"
-          BIN_DIR="$RUNNER_TEMP/kicad-bin"
-          SHIM="$BIN_DIR/kicad-cli"
-          mkdir -p "$KICAD_HOME" "$BIN_DIR"
-
-          # Image, workspace and home are baked in now; $PWD and "$@" are evaluated
-          # each time the shim runs.
-          {
-            echo '#!/usr/bin/env bash'
-            echo 'set -euo pipefail'
-            printf 'KICAD_IMAGE=%q\n' "$KICAD_IMAGE"
-            printf 'KICAD_WORKSPACE=%q\n' "$GITHUB_WORKSPACE"
-            printf 'KICAD_HOME=%q\n' "$KICAD_HOME"
-            echo 'exec docker run --rm --user "$(id -u):$(id -g)" -e HOME="$KICAD_HOME" -v "$KICAD_HOME:$KICAD_HOME" -v "$KICAD_WORKSPACE:$KICAD_WORKSPACE" -w "$PWD" "$KICAD_IMAGE" kicad-cli "$@"'
-          } > "$SHIM"
-          chmod +x "$SHIM"
-
-          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          dirname "$SHIM" >> "$GITHUB_PATH"
           echo "KICAD_CLI=$SHIM" >> "$GITHUB_ENV"
-
-          VERSION_OUTPUT="$("$SHIM" --version)"
-          if [[ -z "$VERSION_OUTPUT" ]]; then
-            echo "kicad-cli --version produced no output from image '$KICAD_IMAGE'." >&2
-            exit 1
-          fi
-          echo "Using KiCad CLI shim at: $SHIM"
-          echo "kicad-cli version: $VERSION_OUTPUT"
-
-          # Diagnostics: the container must be able to write to its HOME and to the
-          # workspace as the runner user, and files it creates must be owned by it.
-          PROBE="$GITHUB_WORKSPACE/.kicad-cli-probe"
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME="$KICAD_HOME" \
-            -v "$KICAD_HOME:$KICAD_HOME" -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
-            -w "$GITHUB_WORKSPACE" "$KICAD_IMAGE" \
-            sh -c 'touch "$HOME/.probe" "$1"' sh "$PROBE"
-          PROBE_OWNER="$(stat -c '%u:%g' "$PROBE")"
-          rm -f "$PROBE" "$KICAD_HOME/.probe"
-          echo "Container-written file owner: $PROBE_OWNER (runner: $(id -u):$(id -g))"
-          if [[ "$PROBE_OWNER" != "$(id -u):$(id -g)" ]]; then
-            echo "Files written by the KiCad container are not owned by the runner user." >&2
-            exit 1
-          fi
 
       - name: Resolve release context
         id: rel
@@ -192,11 +133,13 @@ jobs:
             MODE="selective"
           fi
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "release_value=$RELEASE_VALUE" >> "$GITHUB_OUTPUT"
-          echo "release_label=$RELEASE_LABEL" >> "$GITHUB_OUTPUT"
-          echo "project_ids_csv=$PROJECT_IDS_CSV" >> "$GITHUB_OUTPUT"
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "release_value=$RELEASE_VALUE"
+            echo "release_label=$RELEASE_LABEL"
+            echo "project_ids_csv=$PROJECT_IDS_CSV"
+            echo "mode=$MODE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate legacy tag mode
         if: steps.rel.outputs.mode == 'legacy'
@@ -260,56 +203,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          MANIFEST=".release-out/release-manifest.json"
-          if [[ ! -f "$MANIFEST" ]]; then
-            echo "Manifest not found: $MANIFEST" >&2
-            exit 1
-          fi
-
           rm -f ./*.zip
 
-          # One "<project-id><TAB><output-dir>" line per project generated by this run.
-          ENTRIES="$(python3 - "$MANIFEST" <<'PY'
-          import json
-          import sys
-
-          with open(sys.argv[1], "r", encoding="utf-8") as handle:
-              manifest = json.load(handle)
-
-          for project in manifest.get("projects", []):
-              print(f"{project['id']}\t{project['output_dir']}")
-          PY
-          )"
-
-          ZIP_FILES=()
-          while IFS=$'\t' read -r PROJECT_ID OUTPUT_DIR; do
-            if [[ -z "$PROJECT_ID" ]]; then
-              continue
-            fi
-            if [[ ! -d "$OUTPUT_DIR" ]] || [[ -z "$(ls -A "$OUTPUT_DIR")" ]]; then
-              echo "Output directory for project '$PROJECT_ID' is missing or empty: $OUTPUT_DIR" >&2
-              exit 1
-            fi
-
-            ZIP_NAME="${PROJECT_ID}-gerber-${RELEASE_LABEL}.zip"
-            ZIP_PATH="$PWD/$ZIP_NAME"
-            (
-              cd "$OUTPUT_DIR"
-              zip -r "$ZIP_PATH" .
-            )
-            ZIP_FILES+=("$ZIP_NAME")
-          done <<< "$ENTRIES"
-
-          if [[ "${#ZIP_FILES[@]}" -eq 0 ]]; then
-            echo "No ZIP files produced." >&2
-            exit 1
-          fi
+          # Prints one ZIP file name per project in the manifest.
+          ZIP_LIST="$(bash scripts/package_release_artifacts.sh .release-out/release-manifest.json "$RELEASE_LABEL" "$PWD")"
 
           {
             echo "zip_files<<EOF"
-            for ZIP_FILE in "${ZIP_FILES[@]}"; do
-              echo "$ZIP_FILE"
-            done
+            echo "$ZIP_LIST"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 

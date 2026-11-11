@@ -34,10 +34,12 @@ jobs:
           TAR_NAME="${ARCHIVE_BASE}.tar.gz"
           SHA_NAME="${TAR_NAME}.sha256"
 
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "archive_base=$ARCHIVE_BASE" >> "$GITHUB_OUTPUT"
-          echo "tar_name=$TAR_NAME" >> "$GITHUB_OUTPUT"
-          echo "sha_name=$SHA_NAME" >> "$GITHUB_OUTPUT"
+          {
+            echo "tag=$TAG"
+            echo "archive_base=$ARCHIVE_BASE"
+            echo "tar_name=$TAR_NAME"
+            echo "sha_name=$SHA_NAME"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build module release archive
         shell: bash
