@@ -299,7 +299,7 @@ jobs:
           verify_payload = json.loads(verify_result.stdout)
           assert verify_payload["verified"] is True
           assert verify_payload["valid"] is True
-          assert len(verify_payload["files"]) == 3
+          assert len(verify_payload["files"]) == 4
 
           legacy_metadata_path = target_dir / ".kicad-release-automation-version-legacy.json"
           legacy_metadata_path.write_text(
