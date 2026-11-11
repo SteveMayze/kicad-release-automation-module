@@ -197,11 +197,11 @@ jobs:
           assert spec is not None and spec.loader is not None
           spec.loader.exec_module(mod)
 
-          assert mod.windows_to_wsl_path(r"D:\\pcbs\\board.kicad_pro") == "/mnt/d/pcbs/board.kicad_pro"
+          assert mod.windows_to_wsl_path(r"D:\pcbs\board.kicad_pro") == "/mnt/d/pcbs/board.kicad_pro"
 
           os.environ["WSL_DISTRO_NAME"] = "UnitTest"
           converted = mod.normalize_user_path(
-            r"D:\\pcbs\\board.kicad_pro",
+            r"D:\pcbs\board.kicad_pro",
             Path.cwd(),
             context="unit-test",
           )
@@ -210,7 +210,7 @@ jobs:
           assert mod.format_path_for_cli(Path("/mnt/d/pcbs/board.kicad_pro"), True) == r"D:\pcbs\board.kicad_pro"
 
           try:
-            mod.normalize_user_path(r"\\\\server\\share\\board.kicad_pro", Path.cwd(), context="unit-test")
+            mod.normalize_user_path(r"\\server\share\board.kicad_pro", Path.cwd(), context="unit-test")
           except SystemExit:
             pass
           else:
