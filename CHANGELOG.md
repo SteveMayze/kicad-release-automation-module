@@ -6,6 +6,15 @@ The format is inspired by Keep a Changelog, and this project follows semantic ve
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-11
+
+### Breaking
+- New managed files: `scripts/setup_kicad_cli_container.sh` and `scripts/package_release_artifacts.sh` (and `scripts/find_kicad_cli.py` is now listed as managed everywhere). Re-run `install.sh` and commit all managed files together; the workflow fails without the two new scripts.
+- The release workflow needs Docker on the runner and pulls the KiCad container image (`KICAD_IMAGE`, default `kicad/kicad:10.0`) instead of installing KiCad.
+- The release workflow writes to `.release-out/` and no longer reads or packages `gerber/`. Anything committed under `gerber/` is ignored by releases.
+- `generate_release_artifacts.py` writes `release-manifest.json` into the output directory after each non-dry-run run, and refuses to run when `kicad-cli` is older than a selected board.
+- `--dry-run` no longer updates `text_variables.RELEASE` or creates output directories.
+
 ### Added
 - Added `gerber.additional_files` config support to copy extra files into the Gerber ZIP root.
 - Added installed-version metadata and a local `check_release_automation_update.py` helper to query the latest module release.
@@ -32,6 +41,9 @@ The format is inspired by Keep a Changelog, and this project follows semantic ve
 - Workflow template now generates into a clean `.release-out/` directory and packages one ZIP per manifest entry, so committed `gerber/` content is never published. ZIP names are unchanged.
 - Workflow template passes inputs, ref name and step outputs to shell steps through `env:` instead of inline interpolation.
 - Workflow template now runs `kicad-cli` from the official KiCad container image (`KICAD_IMAGE`, default `kicad/kicad:10.0`) through a shim, replacing the AppImage download and the `PATH` lookup step.
+
+- Documented the container-based KiCad CLI, `KICAD_IMAGE`, the `kicad.image` override, the `dry_run` input and running the shim locally; removed the outdated note about the Ubuntu KiCad package.
+- `install.sh` closing hint now mentions `projects[]` as well as `project.path`.
 
 ### Fixed
 - `uninstall.sh` now also removes `scripts/find_kicad_cli.py`.

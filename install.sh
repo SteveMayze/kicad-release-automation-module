@@ -198,4 +198,4 @@ fi
 write_metadata_file
 
 echo "Installed KiCad release automation into: $TARGET_DIR"
-echo "Next: review release-artifacts.json project.path and commit changes."
+echo "Next: review release-artifacts.json (projects[] entries, or project.path for a single project) and commit changes."

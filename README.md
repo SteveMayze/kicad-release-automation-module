@@ -80,7 +80,7 @@ Recommended validation sequence:
 
 1. Re-run `install.sh` from the desired module version in this repository.
 2. Run the dry-run command above in the target repository.
-3. If dry-run output is correct, run a non-dry-run execution locally (requires `kicad-cli`) or push a release tag and let CI generate deliverables.
+3. If dry-run output is correct, run a non-dry-run execution locally (requires `kicad-cli`, installed or through the container shim described in "KiCad CLI in target CI"), or run the workflow manually with `dry_run` enabled, before pushing a release tag.
 
 ## Locate KiCad CLI
 
@@ -218,10 +218,43 @@ Behavior:
 - The workflow generates into a clean `.release-out/` directory in the workspace and packages only what that run generated. A committed `gerber/` directory is not read and never ends up in a release ZIP.
 - For local runs the default output directory is still `gerber/`; in multi-project mode each project exports into `gerber/<project-id>/`.
 
+## KiCad CLI in target CI
+
+The release workflow does not install KiCad on the runner. It runs `kicad-cli` from the official KiCad container image:
+
+- The image is set by the workflow-level `KICAD_IMAGE` variable (default `kicad/kicad:10.0`; `major.minor` tags follow the latest patch release, `major.minor.patch` tags are fixed).
+- To use a different image in one target without editing the managed workflow, set `kicad.image` in that target's `release-artifacts.json` (see "Configure in target project"). It survives reinstall.
+- `scripts/setup_kicad_cli_container.sh <image> <bin-dir>` pulls the image and writes a `kicad-cli` shim into `<bin-dir>`. The shim runs the image as the calling user with the workspace mounted at the same absolute path, so the generator script needs no knowledge of Docker. The workflow puts the shim on `PATH` and in `KICAD_CLI`.
+- The image must be at least as new as the KiCad version your boards were saved with; the generator stops with a clear message if it is not.
+
+### Run the shim locally
+
+With Docker available, the same shim works on a development machine. From the target repository root:
+
+```bash
+export KICAD_CLI="$(bash scripts/setup_kicad_cli_container.sh kicad/kicad:10.0 .release-out/kicad-bin)"
+
+python3 scripts/generate_release_artifacts.py \
+	--config release-artifacts.json \
+	--project-id board-a \
+	--release 0.0.0 \
+	--no-update-release-variable \
+	--output-dir .release-out/gerber \
+	--manifest .release-out/release-manifest.json
+
+bash scripts/package_release_artifacts.sh .release-out/release-manifest.json r0.0.0 .release-out
+```
+
+Only the directory the shim was created from (the current directory, or `KICAD_CLI_MOUNT_DIR`) is visible to `kicad-cli`, so project files and the output directory must be inside it. `.release-out/` is scratch output; do not commit it.
+
+### Test the workflow without publishing
+
+Run the workflow manually (`workflow_dispatch`) with `release_tag` set and `dry_run` enabled. The ZIPs are built and uploaded as a workflow artifact, and no GitHub Release is created.
+
 ## Notes
 
-- Target project CI installs the Ubuntu KiCad package instead of the Launchpad nightly PPA because the Launchpad PPA is unreliable in hosted GitHub Actions runners.
-- Tag-triggered target workflows run from the workflow file in the tagged commit.
+- Tag-triggered target workflows run from the workflow file in the tagged commit. Re-pushing or moving a tag does not pick up a later workflow fix, so test fixes with `workflow_dispatch` (with `dry_run` enabled) from the branch that contains them, then create a new tag.
+- A committed `gerber/` directory in a target is not read by the workflow. Keep it only if you want a manually exported copy in the repository.
 
 ## Module versioning and releases
 
