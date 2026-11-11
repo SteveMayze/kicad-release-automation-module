@@ -27,6 +27,11 @@ WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 UNC_PATH_PATTERN = re.compile(r"^[\\/]{2}[^\\/]+[\\/][^\\/]+")
 WSL_MOUNT_DRIVE_PATTERN = re.compile(r"^/mnt/([a-zA-Z])(?:/(.*))?$")
 DEFAULT_CONFIG_FILE = "release-artifacts.json"
+DEFAULT_MANIFEST_NAME = "release-manifest.json"
+MANIFEST_SCHEMA_VERSION = 1
+PCB_GENERATOR_VERSION_PATTERN = re.compile(r'\(generator_version\s+"([^"]+)"\)')
+VERSION_NUMBER_PATTERN = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+KICAD_CLI_VERSION_TIMEOUT_SECONDS = 300
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,6 +81,14 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for Gerber and drill files (default: gerber).",
     )
     parser.add_argument(
+        "--manifest",
+        type=Path,
+        help=(
+            "Path of the manifest JSON written after a successful run "
+            f"(default: <output-dir>/{DEFAULT_MANIFEST_NAME})."
+        ),
+    )
+    parser.add_argument(
         "--no-update-release-variable",
         action="store_true",
         help="Do not write text_variables.RELEASE in the .kicad_pro file.",
@@ -93,7 +106,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print actions without running kicad-cli commands.",
+        help=(
+            "Print actions without running kicad-cli export commands, modifying "
+            "project files or creating directories."
+        ),
     )
     return parser.parse_args()
 
@@ -541,6 +557,139 @@ def set_project_release(project_file: Path, release_value: str) -> None:
         print(f"RELEASE text variable already set to {release_value!r}")
 
 
+def read_board_generator_version(pcb_file: Path) -> Optional[str]:
+    """Return the generator_version recorded in a .kicad_pcb header, if any."""
+    try:
+        with pcb_file.open("r", encoding="utf-8-sig", errors="ignore") as handle:
+            header = handle.read(4096)
+    except OSError:
+        return None
+
+    match = PCB_GENERATOR_VERSION_PATTERN.search(header)
+    if not match:
+        return None
+    return match.group(1).strip() or None
+
+
+def parse_major_version(version_text: str) -> Optional[int]:
+    match = VERSION_NUMBER_PATTERN.search(version_text)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def kicad_cli_is_available(kicad_cli: str) -> bool:
+    return Path(kicad_cli).exists() or shutil.which(kicad_cli) is not None
+
+
+def query_kicad_cli_version(kicad_cli: str, cwd: Path) -> Optional[str]:
+    """Return the version line printed by kicad-cli --version, or None."""
+    try:
+        result = subprocess.run(
+            [kicad_cli, "--version"],
+            cwd=str(cwd),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=KICAD_CLI_VERSION_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    for line in result.stdout.splitlines():
+        if VERSION_NUMBER_PATTERN.search(line):
+            return line.strip()
+    return None
+
+
+def preflight_board_versions(
+    kicad_cli: str,
+    projects: list[dict[str, Any]],
+    repo_root: Path,
+    dry_run: bool,
+) -> None:
+    """Fail early when kicad-cli is older than a selected board's file format."""
+    boards: list[tuple[str, Path, str, int]] = []
+    for project in projects:
+        pcb_file = project["project_file"].with_suffix(".kicad_pcb")
+        if not pcb_file.exists():
+            continue
+        board_version = read_board_generator_version(pcb_file)
+        if board_version is None:
+            continue
+        board_major = parse_major_version(board_version)
+        if board_major is None:
+            continue
+        boards.append((project["id"], pcb_file, board_version, board_major))
+
+    if not boards:
+        return
+
+    if dry_run and not kicad_cli_is_available(kicad_cli):
+        print("Skipping board/kicad-cli version check (--dry-run without kicad-cli).")
+        return
+
+    cli_version = query_kicad_cli_version(kicad_cli, repo_root)
+    cli_major = parse_major_version(cli_version) if cli_version else None
+    if cli_version is None or cli_major is None:
+        print(
+            "WARNING: could not determine the kicad-cli version; "
+            "skipping board/kicad-cli version check.",
+            file=sys.stderr,
+        )
+        return
+
+    print(f"kicad-cli version: {cli_version}")
+    for project_id, pcb_file, board_version, board_major in boards:
+        if cli_major < board_major:
+            image = os.environ.get("KICAD_IMAGE") or "not set"
+            fail(
+                f"Board {pcb_file} (project '{project_id}') was saved by KiCad "
+                f"{board_version}, but kicad-cli is version {cli_version}. "
+                f"A kicad-cli of version {board_major} or newer is required. "
+                f"In CI, set KICAD_IMAGE (currently: {image}) or kicad.image in "
+                "release-artifacts.json to a matching KiCad image."
+            )
+
+
+def path_for_manifest(path_value: Path, repo_root: Path) -> str:
+    """Repo-relative POSIX path when inside the repository, else absolute."""
+    try:
+        return path_value.relative_to(repo_root).as_posix()
+    except ValueError:
+        return str(path_value)
+
+
+def write_manifest(
+    manifest_path: Path,
+    repo_root: Path,
+    release_value: Optional[str],
+    entries: list[dict[str, Any]],
+) -> None:
+    payload = {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "release": release_value,
+        "projects": [
+            {
+                "id": entry["id"],
+                "project_file": path_for_manifest(entry["project_file"], repo_root),
+                "output_dir": path_for_manifest(entry["output_dir"], repo_root),
+                "release": release_value,
+            }
+            for entry in entries
+        ],
+    }
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    print(f"Wrote manifest: {manifest_path}")
+
+
 def load_config(repo_root: Path, config_path: Path) -> dict:
     resolved_path = normalize_user_path(
         str(config_path),
@@ -955,7 +1104,24 @@ def main() -> None:
         repo_root,
         context="--output-dir",
     )
-    output_root_dir.mkdir(parents=True, exist_ok=True)
+    if args.manifest is not None:
+        manifest_path = normalize_user_path(
+            str(args.manifest),
+            repo_root,
+            context="--manifest",
+        )
+    else:
+        manifest_path = output_root_dir / DEFAULT_MANIFEST_NAME
+
+    preflight_board_versions(
+        kicad_cli,
+        projects_to_process,
+        repo_root,
+        dry_run=args.dry_run,
+    )
+
+    if not args.dry_run:
+        output_root_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using kicad-cli: {kicad_cli}")
     if use_windows_paths:
@@ -982,6 +1148,7 @@ def main() -> None:
     elif not release_value:
         print("No release value provided. Existing RELEASE text variable is unchanged.")
 
+    manifest_entries: list[dict[str, Any]] = []
     for project in projects_to_process:
         project_id = project["id"]
         project_file = project["project_file"]
@@ -993,7 +1160,13 @@ def main() -> None:
             fail(f"PCB file not found for project '{project_id}': {pcb_file}")
 
         if release_value and not args.no_update_release_variable:
-            set_project_release(project_file, release_value)
+            if args.dry_run:
+                print(
+                    "Dry run: RELEASE text variable would be set to "
+                    f"{release_value!r} in {project_file}"
+                )
+            else:
+                set_project_release(project_file, release_value)
 
         project_gerber_config = {"gerber": project.get("gerber", {})}
         configured_layer_list = get_configured_gerber_layers_list(project_gerber_config)
@@ -1004,7 +1177,8 @@ def main() -> None:
         additional_files = get_configured_additional_files(repo_root, project_gerber_config)
 
         project_output_dir = output_root_dir if not multi_project_mode else output_root_dir / project_id
-        project_output_dir.mkdir(parents=True, exist_ok=True)
+        if not args.dry_run:
+            project_output_dir.mkdir(parents=True, exist_ok=True)
 
         print(f"Project: {project_id}")
         print(f"  Project file: {project_file}")
@@ -1191,6 +1365,19 @@ def main() -> None:
                 fallback_cwd=fallback_cwd,
                 dry_run=args.dry_run,
             )
+
+        manifest_entries.append(
+            {
+                "id": project_id,
+                "project_file": project_file,
+                "output_dir": project_output_dir,
+            }
+        )
+
+    if args.dry_run:
+        print(f"Dry run: manifest not written (would be {manifest_path}).")
+    else:
+        write_manifest(manifest_path, repo_root, release_value, manifest_entries)
 
     print("Artifact generation complete.")
 

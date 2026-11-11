@@ -15,6 +15,11 @@ on:
         description: "Optional comma-separated project IDs for selective release"
         required: false
         type: string
+      dry_run:
+        description: "Build and upload the ZIPs as a workflow artifact, but do not publish a release"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -41,6 +46,36 @@ jobs:
           # shim, so the job itself stays on the hosted runner. The workspace is
           # mounted at the same absolute path inside the container, which keeps the
           # absolute paths passed by generate_release_artifacts.py valid.
+
+          # Optional per-target override: "kicad": {"image": "..."} in
+          # release-artifacts.json replaces the default KICAD_IMAGE.
+          CONFIG_IMAGE="$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config_path = Path("release-artifacts.json")
+          image = ""
+          if config_path.exists():
+              payload = json.loads(config_path.read_text(encoding="utf-8-sig"))
+              kicad = payload.get("kicad") if isinstance(payload, dict) else None
+              if kicad is not None:
+                  if not isinstance(kicad, dict):
+                      raise SystemExit("Config field 'kicad' must be a JSON object.")
+                  value = kicad.get("image")
+                  if value is not None:
+                      if not isinstance(value, str) or not value.strip() or any(c.isspace() for c in value.strip()):
+                          raise SystemExit("Config field kicad.image must be a non-empty string without whitespace.")
+                      image = value.strip()
+          print(image)
+          PY
+          )"
+          if [[ -n "$CONFIG_IMAGE" ]]; then
+            echo "Using KiCad image from release-artifacts.json: $CONFIG_IMAGE (default: $KICAD_IMAGE)"
+            KICAD_IMAGE="$CONFIG_IMAGE"
+            echo "KICAD_IMAGE=$KICAD_IMAGE" >> "$GITHUB_ENV"
+          fi
+          echo "KiCad image: $KICAD_IMAGE"
+
           PULLED=0
           for ATTEMPT in 1 2 3; do
             if docker pull "$KICAD_IMAGE"; then
@@ -109,13 +144,18 @@ jobs:
       - name: Resolve release context
         id: rel
         shell: bash
+        env:
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_PROJECT_IDS: ${{ inputs.project_ids }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          if [[ -n "${{ inputs.release_tag }}" ]]; then
-            TAG="${{ inputs.release_tag }}"
-          elif [[ "${{ github.ref_type }}" == "tag" && -n "${{ github.ref_name }}" ]]; then
-            TAG="${{ github.ref_name }}"
+          if [[ -n "$INPUT_RELEASE_TAG" ]]; then
+            TAG="$INPUT_RELEASE_TAG"
+          elif [[ "$REF_TYPE" == "tag" && -n "$REF_NAME" ]]; then
+            TAG="$REF_NAME"
           else
             echo "No release tag provided. For manual runs, set workflow input release_tag." >&2
             exit 1
@@ -136,7 +176,6 @@ jobs:
             exit 1
           fi
 
-          INPUT_PROJECT_IDS="${{ inputs.project_ids }}"
           INPUT_PROJECT_IDS="${INPUT_PROJECT_IDS// /}"
           if [[ -n "$PROJECT_FROM_TAG" && -n "$INPUT_PROJECT_IDS" ]]; then
             echo "Do not set workflow input project_ids when tag already targets a project." >&2
@@ -183,17 +222,27 @@ jobs:
 
       - name: Generate Gerber and drill files
         shell: bash
+        env:
+          RELEASE_VALUE: ${{ steps.rel.outputs.release_value }}
+          PROJECT_IDS_CSV: ${{ steps.rel.outputs.project_ids_csv }}
         run: |
           set -euo pipefail
+
+          # Generate into a clean, untracked directory inside the workspace (the
+          # KiCad container only sees the workspace), so nothing committed under
+          # gerber/ can end up in a release ZIP.
+          rm -rf .release-out
 
           CMD=(
             python3 scripts/generate_release_artifacts.py
             --config release-artifacts.json
-            --release "${{ steps.rel.outputs.release_value }}"
+            --release "$RELEASE_VALUE"
+            --output-dir .release-out/gerber
+            --manifest .release-out/release-manifest.json
           )
 
-          if [[ -n "${{ steps.rel.outputs.project_ids_csv }}" ]]; then
-            IFS=',' read -r -a PROJECT_IDS <<< "${{ steps.rel.outputs.project_ids_csv }}"
+          if [[ -n "$PROJECT_IDS_CSV" ]]; then
+            IFS=',' read -r -a PROJECT_IDS <<< "$PROJECT_IDS_CSV"
             for PROJECT_ID in "${PROJECT_IDS[@]}"; do
               if [[ -n "$PROJECT_ID" ]]; then
                 CMD+=(--project-id "$PROJECT_ID")
@@ -206,41 +255,50 @@ jobs:
       - name: Package gerber deliverables
         id: package
         shell: bash
+        env:
+          RELEASE_LABEL: ${{ steps.rel.outputs.release_label }}
         run: |
           set -euo pipefail
 
-          RELEASE_LABEL="${{ steps.rel.outputs.release_label }}"
+          MANIFEST=".release-out/release-manifest.json"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "Manifest not found: $MANIFEST" >&2
+            exit 1
+          fi
+
           rm -f ./*.zip
 
-          mapfile -t PROJECT_DIRS < <(find gerber -mindepth 1 -maxdepth 1 -type d | sort)
+          # One "<project-id><TAB><output-dir>" line per project generated by this run.
+          ENTRIES="$(python3 - "$MANIFEST" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as handle:
+              manifest = json.load(handle)
+
+          for project in manifest.get("projects", []):
+              print(f"{project['id']}\t{project['output_dir']}")
+          PY
+          )"
 
           ZIP_FILES=()
-          if [[ "${#PROJECT_DIRS[@]}" -gt 0 ]]; then
-            for PROJECT_DIR in "${PROJECT_DIRS[@]}"; do
-              PROJECT_ID="$(basename "$PROJECT_DIR")"
-              ZIP_NAME="${PROJECT_ID}-gerber-${RELEASE_LABEL}.zip"
-              (
-                cd "$PROJECT_DIR"
-                zip -r "../../${ZIP_NAME}" .
-              )
-              ZIP_FILES+=("$ZIP_NAME")
-            done
-          else
-            PROJECT_PATH="$(python3 -c 'import json; print(json.load(open("release-artifacts.json", "r", encoding="utf-8"))["project"]["path"])')"
-            PROJECT_NAME="$(basename "$PROJECT_PATH" .kicad_pro)"
-
-            if [[ -z "$PROJECT_NAME" ]]; then
-              echo "Could not resolve project name from release-artifacts.json" >&2
+          while IFS=$'\t' read -r PROJECT_ID OUTPUT_DIR; do
+            if [[ -z "$PROJECT_ID" ]]; then
+              continue
+            fi
+            if [[ ! -d "$OUTPUT_DIR" ]] || [[ -z "$(ls -A "$OUTPUT_DIR")" ]]; then
+              echo "Output directory for project '$PROJECT_ID' is missing or empty: $OUTPUT_DIR" >&2
               exit 1
             fi
 
-            ZIP_NAME="${PROJECT_NAME}-gerber-${RELEASE_LABEL}.zip"
+            ZIP_NAME="${PROJECT_ID}-gerber-${RELEASE_LABEL}.zip"
+            ZIP_PATH="$PWD/$ZIP_NAME"
             (
-              cd gerber
-              zip -r "../${ZIP_NAME}" .
+              cd "$OUTPUT_DIR"
+              zip -r "$ZIP_PATH" .
             )
             ZIP_FILES+=("$ZIP_NAME")
-          fi
+          done <<< "$ENTRIES"
 
           if [[ "${#ZIP_FILES[@]}" -eq 0 ]]; then
             echo "No ZIP files produced." >&2
@@ -262,6 +320,7 @@ jobs:
           path: ${{ steps.package.outputs.zip_files }}
 
       - name: Attach ZIPs to release
+        if: ${{ inputs.dry_run != true }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.rel.outputs.tag }}
