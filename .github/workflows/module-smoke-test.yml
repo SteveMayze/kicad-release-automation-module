@@ -93,6 +93,7 @@ jobs:
           cmp "$TARGET_DIR/release-artifacts.json" "$TARGET_DIR/release-artifacts.json.before"
           test -f "$TARGET_DIR/.kicad-release-automation-version.json"
           test -f "$TARGET_DIR/scripts/check_release_automation_update.py"
+          test -f "$TARGET_DIR/scripts/find_kicad_cli.py"
 
           python3 - "$TARGET_DIR" <<'PY'
           import json
@@ -112,6 +113,7 @@ jobs:
           assert isinstance(managed_files, dict)
           assert "scripts/generate_release_artifacts.py" in managed_files
           assert "scripts/check_release_automation_update.py" in managed_files
+          assert "scripts/find_kicad_cli.py" in managed_files
           assert ".github/workflows/release-gerbers.yml" in managed_files
           for details in managed_files.values():
             assert isinstance(details, dict)
@@ -136,6 +138,52 @@ jobs:
           python3 scripts/generate_release_artifacts.py \
             --config release-artifacts.json \
             --release 1.2.3 \
+            --dry-run
+
+          cp hardware/demo.kicad_pro hardware/demo-aux.kicad_pro
+          cp hardware/demo.kicad_pcb hardware/demo-aux.kicad_pcb
+
+          cat > release-artifacts-multi.json <<'JSON'
+          {
+            "defaults": {
+              "gerber": {
+                "include_layers": [
+                  "F.Cu",
+                  "In1.Cu",
+                  "In2.Cu",
+                  "B.Cu",
+                  "F.Paste",
+                  "B.Paste",
+                  "F.SilkS",
+                  "B.SilkS",
+                  "F.Mask",
+                  "B.Mask",
+                  "Edge.Cuts"
+                ]
+              }
+            },
+            "projects": [
+              {
+                "id": "demo-main",
+                "path": "hardware/demo.kicad_pro"
+              },
+              {
+                "id": "demo-aux",
+                "path": "hardware/demo-aux.kicad_pro"
+              }
+            ]
+          }
+          JSON
+
+          python3 scripts/generate_release_artifacts.py \
+            --config release-artifacts-multi.json \
+            --release 1.2.3 \
+            --project-id demo-aux \
+            --dry-run
+
+          python3 scripts/generate_release_artifacts.py \
+            --config release-artifacts-multi.json \
+            --release demo-aux/1.2.3 \
             --dry-run
 
           python3 - <<'PY'

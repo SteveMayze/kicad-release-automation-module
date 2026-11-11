@@ -1,21 +1,35 @@
 {
-  "project": {
-    "path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
+  "defaults": {
+    "gerber": {
+      "include_layers": [
+        "F.Cu",
+        "In1.Cu",
+        "In2.Cu",
+        "B.Cu",
+        "F.Paste",
+        "B.Paste",
+        "F.SilkS",
+        "B.SilkS",
+        "F.Mask",
+        "B.Mask",
+        "Edge.Cuts"
+      ],
+      "additional_files": []
+    }
   },
-  "gerber": {
-    "include_layers": [
-      "F.Cu",
-      "In1.Cu",
-      "In2.Cu",
-      "B.Cu",
-      "F.Paste",
-      "B.Paste",
-      "F.SilkS",
-      "B.SilkS",
-      "F.Mask",
-      "B.Mask",
-      "Edge.Cuts"
-    ],
-    "additional_files": []
-  }
+  "projects": [
+    {
+      "id": "atmega1608-dev",
+      "path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
+    },
+    {
+      "id": "lps-power-2",
+      "path": "kicad/lps-power-4-layer/lps-power-2.kicad_pro",
+      "gerber": {
+        "additional_files": [
+          "fab/lps-power-2-note.txt"
+        ]
+      }
+    }
+  ]
 }

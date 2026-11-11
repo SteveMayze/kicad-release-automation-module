@@ -4,10 +4,15 @@ on:
   push:
     tags:
       - "r*.*.*"
+      - "r/*/*"
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag in r#.#.# format (optional for manual runs)"
+        description: "Release tag: r#.#.# (legacy) or r/<project-id>/#.#.# (targeted)"
+        required: false
+        type: string
+      project_ids:
+        description: "Optional comma-separated project IDs for selective release"
         required: false
         type: string
 
@@ -49,7 +54,7 @@ jobs:
           echo "Using KiCad CLI at: $CLI_PATH"
           "$CLI_PATH" --version
 
-      - name: Resolve release tag
+      - name: Resolve release context
         id: rel
         shell: bash
         run: |
@@ -64,56 +69,148 @@ jobs:
             exit 1
           fi
 
-          if [[ ! "$TAG" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Tag '$TAG' must match r#.#.#" >&2
+          PROJECT_FROM_TAG=""
+          RELEASE_VALUE=""
+          RELEASE_LABEL=""
+          if [[ "$TAG" =~ ^r([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            RELEASE_VALUE="${BASH_REMATCH[1]}"
+            RELEASE_LABEL="r${RELEASE_VALUE}"
+          elif [[ "$TAG" =~ ^r/([A-Za-z0-9._-]+)/([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            PROJECT_FROM_TAG="${BASH_REMATCH[1]}"
+            RELEASE_VALUE="${BASH_REMATCH[2]}"
+            RELEASE_LABEL="r${RELEASE_VALUE}"
+          else
+            echo "Tag '$TAG' must match either r#.#.# or r/<project-id>/#.#.#" >&2
             exit 1
           fi
 
+          INPUT_PROJECT_IDS="${{ inputs.project_ids }}"
+          INPUT_PROJECT_IDS="${INPUT_PROJECT_IDS// /}"
+          if [[ -n "$PROJECT_FROM_TAG" && -n "$INPUT_PROJECT_IDS" ]]; then
+            echo "Do not set workflow input project_ids when tag already targets a project." >&2
+            exit 1
+          fi
+
+          PROJECT_IDS_CSV="$INPUT_PROJECT_IDS"
+          if [[ -n "$PROJECT_FROM_TAG" ]]; then
+            PROJECT_IDS_CSV="$PROJECT_FROM_TAG"
+          fi
+
+          MODE="legacy"
+          if [[ -n "$PROJECT_IDS_CSV" ]]; then
+            MODE="selective"
+          fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_value=$RELEASE_VALUE" >> "$GITHUB_OUTPUT"
+          echo "release_label=$RELEASE_LABEL" >> "$GITHUB_OUTPUT"
+          echo "project_ids_csv=$PROJECT_IDS_CSV" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      - name: Validate legacy tag mode
+        if: steps.rel.outputs.mode == 'legacy'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config_path = Path("release-artifacts.json")
+          if not config_path.exists():
+              raise SystemExit(0)
+
+          payload = json.loads(config_path.read_text(encoding="utf-8"))
+          projects = payload.get("projects")
+          if isinstance(projects, list) and projects:
+              raise SystemExit(
+                  "Legacy plain tag mode is not allowed when config uses projects[]. "
+                  "Use targeted tag r/<project-id>/#.#.# or workflow_dispatch project_ids."
+              )
+          PY
 
       - name: Generate Gerber and drill files
-        run: |
-          python3 scripts/generate_release_artifacts.py \
-            --config release-artifacts.json \
-            --tag "${{ steps.rel.outputs.tag }}"
-
-      - name: Resolve project name
-        id: proj
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_PATH="$(python3 -c 'import json; print(json.load(open("release-artifacts.json", "r", encoding="utf-8"))["project"]["path"])')"
-          PROJECT_NAME="$(basename "$PROJECT_PATH" .kicad_pro)"
+          CMD=(
+            python3 scripts/generate_release_artifacts.py
+            --config release-artifacts.json
+            --release "${{ steps.rel.outputs.release_value }}"
+          )
 
-          if [[ -z "$PROJECT_NAME" ]]; then
-            echo "Could not resolve project name from release-artifacts.json" >&2
+          if [[ -n "${{ steps.rel.outputs.project_ids_csv }}" ]]; then
+            IFS=',' read -r -a PROJECT_IDS <<< "${{ steps.rel.outputs.project_ids_csv }}"
+            for PROJECT_ID in "${PROJECT_IDS[@]}"; do
+              if [[ -n "$PROJECT_ID" ]]; then
+                CMD+=(--project-id "$PROJECT_ID")
+              fi
+            done
+          fi
+
+          "${CMD[@]}"
+
+      - name: Package gerber deliverables
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_LABEL="${{ steps.rel.outputs.release_label }}"
+          rm -f ./*.zip
+
+          mapfile -t PROJECT_DIRS < <(find gerber -mindepth 1 -maxdepth 1 -type d | sort)
+
+          ZIP_FILES=()
+          if [[ "${#PROJECT_DIRS[@]}" -gt 0 ]]; then
+            for PROJECT_DIR in "${PROJECT_DIRS[@]}"; do
+              PROJECT_ID="$(basename "$PROJECT_DIR")"
+              ZIP_NAME="${PROJECT_ID}-gerber-${RELEASE_LABEL}.zip"
+              (
+                cd "$PROJECT_DIR"
+                zip -r "../../${ZIP_NAME}" .
+              )
+              ZIP_FILES+=("$ZIP_NAME")
+            done
+          else
+            PROJECT_PATH="$(python3 -c 'import json; print(json.load(open("release-artifacts.json", "r", encoding="utf-8"))["project"]["path"])')"
+            PROJECT_NAME="$(basename "$PROJECT_PATH" .kicad_pro)"
+
+            if [[ -z "$PROJECT_NAME" ]]; then
+              echo "Could not resolve project name from release-artifacts.json" >&2
+              exit 1
+            fi
+
+            ZIP_NAME="${PROJECT_NAME}-gerber-${RELEASE_LABEL}.zip"
+            (
+              cd gerber
+              zip -r "../${ZIP_NAME}" .
+            )
+            ZIP_FILES+=("$ZIP_NAME")
+          fi
+
+          if [[ "${#ZIP_FILES[@]}" -eq 0 ]]; then
+            echo "No ZIP files produced." >&2
             exit 1
           fi
 
-          echo "project_name=$PROJECT_NAME" >> "$GITHUB_OUTPUT"
+          {
+            echo "zip_files<<EOF"
+            for ZIP_FILE in "${ZIP_FILES[@]}"; do
+              echo "$ZIP_FILE"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Package gerber deliverables
-        run: |
-          set -euo pipefail
-          ZIP_NAME="${{ steps.proj.outputs.project_name }}-gerber-${{ steps.rel.outputs.tag }}.zip"
-          rm -f "$ZIP_NAME"
-          cd gerber
-          zip -r "../$ZIP_NAME" .
-          cd ..
-          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-        id: package
-
-      - name: Upload workflow artifact
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.proj.outputs.project_name }}-gerber-${{ steps.rel.outputs.tag }}
-          path: |
-            gerber/
-            ${{ steps.package.outputs.zip_name }}
+          name: gerber-zips-${{ steps.rel.outputs.release_label }}
+          path: ${{ steps.package.outputs.zip_files }}
 
-      - name: Attach ZIP to release
+      - name: Attach ZIPs to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.rel.outputs.tag }}
-          files: ${{ steps.package.outputs.zip_name }}
+          files: ${{ steps.package.outputs.zip_files }}
