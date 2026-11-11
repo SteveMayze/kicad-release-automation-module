@@ -8,6 +8,8 @@ WORKFLOW_REL_PATH=".github/workflows/release-gerbers.yml"
 SCRIPT_REL_PATH="scripts/generate_release_artifacts.py"
 UPDATE_CHECK_SCRIPT_REL_PATH="scripts/check_release_automation_update.py"
 CLI_HELPER_REL_PATH="scripts/find_kicad_cli.py"
+CLI_CONTAINER_SCRIPT_REL_PATH="scripts/setup_kicad_cli_container.sh"
+PACKAGE_SCRIPT_REL_PATH="scripts/package_release_artifacts.sh"
 CONFIG_REL_PATH="release-artifacts.json"
 METADATA_REL_PATH=".kicad-release-automation-version.json"
 
@@ -92,6 +94,8 @@ write_metadata_file() {
   local script_sha
   local helper_sha
   local cli_helper_sha
+  local cli_container_sha
+  local package_sha
   local workflow_sha
 
   module_version="$(resolve_module_version)"
@@ -101,6 +105,8 @@ write_metadata_file() {
   script_sha="$(compute_sha256 "$TARGET_DIR/$SCRIPT_REL_PATH")"
   helper_sha="$(compute_sha256 "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH")"
   cli_helper_sha="$(compute_sha256 "$TARGET_DIR/$CLI_HELPER_REL_PATH")"
+  cli_container_sha="$(compute_sha256 "$TARGET_DIR/$CLI_CONTAINER_SCRIPT_REL_PATH")"
+  package_sha="$(compute_sha256 "$TARGET_DIR/$PACKAGE_SCRIPT_REL_PATH")"
   workflow_sha="$(compute_sha256 "$TARGET_DIR/$WORKFLOW_REL_PATH")"
 
   cat > "$TARGET_DIR/$METADATA_REL_PATH" <<EOF
@@ -125,6 +131,16 @@ write_metadata_file() {
     "scripts/find_kicad_cli.py": {
       "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
       "sha256": $(printf '%s' "$cli_helper_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    },
+    "scripts/setup_kicad_cli_container.sh": {
+      "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "sha256": $(printf '%s' "$cli_container_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    },
+    "scripts/package_release_artifacts.sh": {
+      "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "sha256": $(printf '%s' "$package_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
       "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
     },
     ".github/workflows/release-gerbers.yml": {
@@ -166,6 +182,11 @@ cp "$SCRIPT_DIR/scripts/check_release_automation_update.py" \
   "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH"
 cp "$SCRIPT_DIR/scripts/find_kicad_cli.py" \
   "$TARGET_DIR/$CLI_HELPER_REL_PATH"
+cp "$SCRIPT_DIR/scripts/setup_kicad_cli_container.sh" \
+  "$TARGET_DIR/$CLI_CONTAINER_SCRIPT_REL_PATH"
+cp "$SCRIPT_DIR/scripts/package_release_artifacts.sh" \
+  "$TARGET_DIR/$PACKAGE_SCRIPT_REL_PATH"
+chmod +x "$TARGET_DIR/$CLI_CONTAINER_SCRIPT_REL_PATH" "$TARGET_DIR/$PACKAGE_SCRIPT_REL_PATH" 2>/dev/null || true
 
 if [[ ! -f "$TARGET_DIR/$CONFIG_REL_PATH" ]]; then
   cp "$SCRIPT_DIR/examples/release-artifacts.json" "$TARGET_DIR/$CONFIG_REL_PATH"

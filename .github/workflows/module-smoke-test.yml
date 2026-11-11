@@ -3,11 +3,31 @@ name: Module Smoke Test
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      kicad_image:
+        description: "KiCad image for the e2e-real-kicad job (default: KICAD_IMAGE from the workflow template)"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  lint-workflows:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout module repository
+        uses: actions/checkout@v5
+
+      - name: Run actionlint on module and template workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.7 -color \
+            .github/workflows/*.yml templates/.github/workflows/*.yml
+
   installer-and-cli:
     runs-on: ubuntu-latest
 
@@ -94,6 +114,8 @@ jobs:
           test -f "$TARGET_DIR/.kicad-release-automation-version.json"
           test -f "$TARGET_DIR/scripts/check_release_automation_update.py"
           test -f "$TARGET_DIR/scripts/find_kicad_cli.py"
+          test -f "$TARGET_DIR/scripts/setup_kicad_cli_container.sh"
+          test -f "$TARGET_DIR/scripts/package_release_artifacts.sh"
 
           python3 - "$TARGET_DIR" <<'PY'
           import json
@@ -114,6 +136,9 @@ jobs:
           assert "scripts/generate_release_artifacts.py" in managed_files
           assert "scripts/check_release_automation_update.py" in managed_files
           assert "scripts/find_kicad_cli.py" in managed_files
+          assert "scripts/setup_kicad_cli_container.sh" in managed_files
+          assert "scripts/package_release_artifacts.sh" in managed_files
+          assert len(managed_files) == 6
           assert ".github/workflows/release-gerbers.yml" in managed_files
           for details in managed_files.values():
             assert isinstance(details, dict)
@@ -462,5 +487,191 @@ jobs:
           verify_payload = json.loads(verify_result.stdout)
           assert verify_payload["verified"] is True
           assert verify_payload["valid"] is True
-          assert len(verify_payload["files"]) == 4
+          assert len(verify_payload["files"]) == 6
           PY
+
+      - name: Validate uninstall removes every managed file
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_DIR="$RUNNER_TEMP/kicad-target"
+          ./uninstall.sh "$TARGET_DIR"
+
+          test ! -e "$TARGET_DIR/.github/workflows/release-gerbers.yml"
+          test ! -e "$TARGET_DIR/scripts/generate_release_artifacts.py"
+          test ! -e "$TARGET_DIR/scripts/check_release_automation_update.py"
+          test ! -e "$TARGET_DIR/scripts/find_kicad_cli.py"
+          test ! -e "$TARGET_DIR/scripts/setup_kicad_cli_container.sh"
+          test ! -e "$TARGET_DIR/scripts/package_release_artifacts.sh"
+          test ! -e "$TARGET_DIR/.kicad-release-automation-version.json"
+          test -f "$TARGET_DIR/release-artifacts.json"
+
+  e2e-real-kicad:
+    runs-on: ubuntu-latest
+    env:
+      INPUT_KICAD_IMAGE: ${{ inputs.kicad_image }}
+
+    steps:
+      - name: Checkout module repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install module into a two-project fixture repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_DIR="$RUNNER_TEMP/e2e-target"
+          mkdir -p "$TARGET_DIR/hardware"
+          cp -r tests/fixtures/board-v10 tests/fixtures/board-v9 "$TARGET_DIR/hardware/"
+
+          cat > "$TARGET_DIR/release-artifacts.json" <<'JSON'
+          {
+            "defaults": {
+              "gerber": {
+                "include_layers": [
+                  "F.Cu",
+                  "B.Cu",
+                  "F.SilkS",
+                  "F.Mask",
+                  "B.Mask",
+                  "Edge.Cuts"
+                ]
+              }
+            },
+            "projects": [
+              {
+                "id": "board-v10",
+                "path": "hardware/board-v10/board-v10.kicad_pro"
+              },
+              {
+                "id": "board-v9",
+                "path": "hardware/board-v9/board-v9.kicad_pro"
+              }
+            ]
+          }
+          JSON
+
+          KICAD_RELEASE_AUTOMATION_VERSION="module-v0.0.0" \
+            KICAD_RELEASE_AUTOMATION_REPO="example/kicad-release-automation-module" \
+            ./install.sh "$TARGET_DIR"
+
+          git -C "$TARGET_DIR" init -q
+          git -C "$TARGET_DIR" add -A
+          git -C "$TARGET_DIR" -c user.name="module-ci" -c user.email="module-ci@example.invalid" \
+            commit -q -m "fixture"
+
+      - name: Set up KiCad CLI (container)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Default to the image the workflow template uses, so this job tests
+          # what targets will run.
+          DEFAULT_IMAGE="$(sed -n 's/^  KICAD_IMAGE:[[:space:]]*//p' templates/.github/workflows/release-gerbers.yml)"
+          if [[ -z "$DEFAULT_IMAGE" ]]; then
+            echo "Could not read KICAD_IMAGE from the workflow template." >&2
+            exit 1
+          fi
+          KICAD_IMAGE="${INPUT_KICAD_IMAGE:-$DEFAULT_IMAGE}"
+          echo "KiCad image: $KICAD_IMAGE"
+          echo "KICAD_IMAGE=$KICAD_IMAGE" >> "$GITHUB_ENV"
+
+          TARGET_DIR="$RUNNER_TEMP/e2e-target"
+          cd "$TARGET_DIR"
+          SHIM="$(KICAD_CLI_MOUNT_DIR="$TARGET_DIR" \
+            bash scripts/setup_kicad_cli_container.sh "$KICAD_IMAGE" "$RUNNER_TEMP/kicad-bin")"
+          test -x "$SHIM"
+          echo "KICAD_CLI=$SHIM" >> "$GITHUB_ENV"
+
+      - name: Generate, verify and package each fixture project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_DIR="$RUNNER_TEMP/e2e-target"
+          cd "$TARGET_DIR"
+          RUNNER_OWNER="$(id -u):$(id -g)"
+
+          # board-v10 was saved by KiCad 10 and board-v9 by KiCad 9: both must plot
+          # with the same CLI, one selected project at a time.
+          for PROJECT_ID in board-v10 board-v9; do
+            if [[ "$PROJECT_ID" == "board-v10" ]]; then
+              OTHER_ID="board-v9"
+            else
+              OTHER_ID="board-v10"
+            fi
+
+            rm -rf .release-out
+            rm -f ./*.zip
+
+            python3 scripts/generate_release_artifacts.py \
+              --config release-artifacts.json \
+              --release 0.0.1 \
+              --project-id "$PROJECT_ID" \
+              --output-dir .release-out/gerber \
+              --manifest .release-out/release-manifest.json
+
+            OUT_DIR=".release-out/gerber/$PROJECT_ID"
+            find .release-out -type f -printf '%p %s bytes owner=%U:%G\n' | sort
+
+            # One Gerber per configured layer, plus a drill file, all non-empty.
+            for SUFFIX in F_Cu B_Cu F_Silkscreen F_Mask B_Mask Edge_Cuts; do
+              MATCHES=("$OUT_DIR/$PROJECT_ID-$SUFFIX".g*)
+              if [[ ! -s "${MATCHES[0]}" ]]; then
+                echo "Missing or empty Gerber for $SUFFIX in $OUT_DIR" >&2
+                exit 1
+              fi
+            done
+            test -s "$OUT_DIR/$PROJECT_ID.drl"
+
+            # Nothing for the unselected project.
+            test ! -e ".release-out/gerber/$OTHER_ID"
+
+            # Everything the container wrote is owned by the runner user.
+            FOREIGN="$(find .release-out ! -user "$(id -u)" -print)"
+            if [[ -n "$FOREIGN" ]]; then
+              echo "Files not owned by the runner user ($RUNNER_OWNER):" >&2
+              echo "$FOREIGN" >&2
+              exit 1
+            fi
+
+            PROJECT_ID="$PROJECT_ID" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          project_id = os.environ["PROJECT_ID"]
+          manifest = json.loads(Path(".release-out/release-manifest.json").read_text(encoding="utf-8"))
+          assert manifest["schema_version"] == 1
+          assert manifest["release"] == "0.0.1"
+          assert manifest["projects"] == [
+            {
+              "id": project_id,
+              "project_file": f"hardware/{project_id}/{project_id}.kicad_pro",
+              "output_dir": f".release-out/gerber/{project_id}",
+              "release": "0.0.1",
+            }
+          ], manifest["projects"]
+          PY
+
+            # Same packaging script the workflow template calls.
+            ZIP_LIST="$(bash scripts/package_release_artifacts.sh .release-out/release-manifest.json r0.0.1 "$PWD")"
+            test "$ZIP_LIST" == "$PROJECT_ID-gerber-r0.0.1.zip"
+            test "$(find . -maxdepth 1 -name '*.zip' | wc -l)" -eq 1
+
+            unzip -l "$ZIP_LIST"
+            unzip -Z1 "$ZIP_LIST" > "$RUNNER_TEMP/zip-contents.txt"
+            grep -q "^$PROJECT_ID-F_Cu\.g" "$RUNNER_TEMP/zip-contents.txt"
+            grep -q "^$PROJECT_ID-Edge_Cuts\.g" "$RUNNER_TEMP/zip-contents.txt"
+            grep -q "^$PROJECT_ID\.drl$" "$RUNNER_TEMP/zip-contents.txt"
+            if grep -q "$OTHER_ID" "$RUNNER_TEMP/zip-contents.txt"; then
+              echo "ZIP for $PROJECT_ID contains files of $OTHER_ID" >&2
+              exit 1
+            fi
+          done

@@ -16,7 +16,11 @@ Module workflows in this repository do not generate production Gerbers for this 
 - `templates/.github/workflows/release-gerbers.yml`
 - `scripts/generate_release_artifacts.py`
 - `scripts/check_release_automation_update.py`
+- `scripts/find_kicad_cli.py`
+- `scripts/setup_kicad_cli_container.sh`
+- `scripts/package_release_artifacts.sh`
 - `examples/release-artifacts.json`
+- `tests/fixtures/` (small purpose-made boards used by module CI only; not installed into targets)
 - `install.sh`
 
 ## Install into a KiCad project
@@ -33,6 +37,9 @@ This installs:
 - `.github/workflows/release-gerbers.yml`
 - `scripts/generate_release_artifacts.py`
 - `scripts/check_release_automation_update.py`
+- `scripts/find_kicad_cli.py`
+- `scripts/setup_kicad_cli_container.sh` (creates the `kicad-cli` shim that runs the KiCad container image)
+- `scripts/package_release_artifacts.sh` (builds one ZIP per project in the release manifest)
 - `release-artifacts.json` (only if it does not already exist)
 - `.kicad-release-automation-version.json`
 
@@ -226,5 +233,5 @@ Behavior:
 
 ## Module repository workflows
 
-- `.github/workflows/module-smoke-test.yml`: validates installer and CLI behavior in non-interactive test scenarios.
+- `.github/workflows/module-smoke-test.yml`: lints the workflows with `actionlint`, validates installer and CLI behavior in non-interactive test scenarios, and (job `e2e-real-kicad`) installs the module into a fixture repository and generates and packages real Gerbers with `kicad-cli` from the KiCad container image. A manual run accepts a `kicad_image` input to test another image.
 - `.github/workflows/module-release.yml`: publishes module release archives/checksums from `module-v#.#.#` tags.

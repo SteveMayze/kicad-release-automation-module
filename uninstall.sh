@@ -6,6 +6,9 @@ TARGET_DIR="${1:-$PWD}"
 WORKFLOW_REL_PATH=".github/workflows/release-gerbers.yml"
 SCRIPT_REL_PATH="scripts/generate_release_artifacts.py"
 UPDATE_CHECK_SCRIPT_REL_PATH="scripts/check_release_automation_update.py"
+CLI_HELPER_REL_PATH="scripts/find_kicad_cli.py"
+CLI_CONTAINER_SCRIPT_REL_PATH="scripts/setup_kicad_cli_container.sh"
+PACKAGE_SCRIPT_REL_PATH="scripts/package_release_artifacts.sh"
 CONFIG_REL_PATH="release-artifacts.json"
 METADATA_REL_PATH=".kicad-release-automation-version.json"
 
@@ -36,6 +39,18 @@ if [[ -f "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH" ]]; then
 else
   echo "Not present: $UPDATE_CHECK_SCRIPT_REL_PATH"
 fi
+
+for MANAGED_REL_PATH in \
+  "$CLI_HELPER_REL_PATH" \
+  "$CLI_CONTAINER_SCRIPT_REL_PATH" \
+  "$PACKAGE_SCRIPT_REL_PATH"; do
+  if [[ -f "$TARGET_DIR/$MANAGED_REL_PATH" ]]; then
+    rm -f "$TARGET_DIR/$MANAGED_REL_PATH"
+    echo "Removed: $MANAGED_REL_PATH"
+  else
+    echo "Not present: $MANAGED_REL_PATH"
+  fi
+done
 
 if [[ -f "$TARGET_DIR/$METADATA_REL_PATH" ]]; then
   rm -f "$TARGET_DIR/$METADATA_REL_PATH"
