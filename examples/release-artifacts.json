@@ -19,15 +19,15 @@
   },
   "projects": [
     {
-      "id": "atmega1608-dev",
-      "path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
+      "id": "board-a",
+      "path": "kicad/board-a/board-a.kicad_pro"
     },
     {
-      "id": "lps-power-2",
-      "path": "kicad/lps-power-4-layer/lps-power-2.kicad_pro",
+      "id": "board-b",
+      "path": "kicad/board-b/board-b.kicad_pro",
       "gerber": {
         "additional_files": [
-          "fab/lps-power-2-note.txt"
+          "fab/board-b-note.txt"
         ]
       }
     }

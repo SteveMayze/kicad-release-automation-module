@@ -56,7 +56,7 @@ Before creating a target project release tag, run local checks in the target rep
 # Preferred explicit form for a selected project
 python3 scripts/generate_release_artifacts.py \
 	--config release-artifacts.json \
-	--project-id ZAM-AdventStar-SixPoint \
+	--project-id board-a \
 	--release 0.0.0 \
 	--dry-run \
 	--no-update-release-variable
@@ -64,7 +64,7 @@ python3 scripts/generate_release_artifacts.py \
 # Compatibility shorthand: project-id/semver is also accepted
 python3 scripts/generate_release_artifacts.py \
 	--config release-artifacts.json \
-	--release ZAM-AdventStar-SixPoint/0.0.0 \
+	--release board-a/0.0.0 \
 	--dry-run \
 	--no-update-release-variable
 ```
@@ -155,15 +155,15 @@ Example:
   },
   "projects": [
     {
-      "id": "atmega1608-dev",
-      "path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
+      "id": "board-a",
+      "path": "kicad/board-a/board-a.kicad_pro"
     },
     {
-      "id": "lps-power-2",
-      "path": "kicad/lps-power-4-layer/lps-power-2.kicad_pro",
+      "id": "board-b",
+      "path": "kicad/board-b/board-b.kicad_pro",
       "gerber": {
         "additional_files": [
-          "fab/lps-power-2-note.txt"
+          "fab/board-b-note.txt"
         ]
       }
     }
@@ -186,7 +186,7 @@ Example:
 Tag conventions:
 
 - Legacy single-project release tag: `r#.#.#` (example: `r1.3.1`)
-- Targeted multi-project release tag: `r/<project-id>/#.#.#` (example: `r/atmega1608-dev/1.3.1`)
+- Targeted multi-project release tag: `r/<project-id>/#.#.#` (example: `r/board-a/1.3.1`)
 - Manual runs can also use `workflow_dispatch` input `project_ids` (comma-separated).
 
 Behavior:
