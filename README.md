@@ -198,7 +198,7 @@ Behavior:
 
 ## Notes
 
-- Target project CI installs KiCad nightly for newer board formats.
+- Target project CI installs the Ubuntu KiCad package instead of the Launchpad nightly PPA because the Launchpad PPA is unreliable in hosted GitHub Actions runners.
 - Tag-triggered target workflows run from the workflow file in the tagged commit.
 
 ## Module versioning and releases

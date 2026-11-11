@@ -29,22 +29,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install KiCad CLI (nightly)
+      - name: Install KiCad CLI
         run: |
           set -euo pipefail
-          sudo add-apt-repository --yes ppa:kicad/kicad-dev-nightly
+
+          # The Launchpad nightly PPA is unreliable in GitHub-hosted runners because it
+          # frequently fails DNS/Launchpad connectivity. Use the Ubuntu package repo,
+          # which is much more stable for CI and still provides kicad-cli for gerber export.
           sudo apt-get update
-          sudo apt-get install --yes kicad-nightly
+          sudo apt-get install --yes --no-install-recommends kicad
+
+          if ! command -v kicad-cli >/dev/null 2>&1; then
+            sudo apt-get install --yes --no-install-recommends kicad-cli
+          fi
 
       - name: Resolve kicad-cli path
         shell: bash
         run: |
           set -euo pipefail
 
-          if command -v kicad-cli-nightly >/dev/null 2>&1; then
-            CLI_PATH="$(command -v kicad-cli-nightly)"
-          elif command -v kicad-cli >/dev/null 2>&1; then
+          if command -v kicad-cli >/dev/null 2>&1; then
             CLI_PATH="$(command -v kicad-cli)"
+          elif command -v kicad-cli-nightly >/dev/null 2>&1; then
+            CLI_PATH="$(command -v kicad-cli-nightly)"
           else
             echo "kicad-cli executable not found after installation." >&2
             exit 1
