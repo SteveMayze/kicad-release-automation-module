@@ -274,14 +274,43 @@ jobs:
                 capture_output=True,
                 text=True,
               )
+
+              payload = json.loads(result.stdout)
+              assert payload["installed_version"] == "module-v1.0.0"
+              assert payload["latest_release"] == "module-v1.3.0"
+              assert payload["update_available"] is True
+
+              legacy_metadata_path = target_dir / ".kicad-release-automation-version-legacy.json"
+              legacy_metadata_path.write_text(
+                json.dumps(
+                  {
+                    "module_repo": "example/kicad-release-automation-module",
+                    "installed_version": "module-v1.0.0",
+                  }
+                ),
+                encoding="utf-8",
+              )
+
+              legacy_result = subprocess.run(
+                [
+                  sys.executable,
+                  str(helper_path),
+                  "--metadata",
+                  str(legacy_metadata_path),
+                  "--api-base-url",
+                  f"http://127.0.0.1:{port}",
+                  "--json",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+              )
+              legacy_payload = json.loads(legacy_result.stdout)
+              assert legacy_payload["installed_version"] == "module-v1.0.0"
+              assert legacy_payload["update_available"] is True
             finally:
               server.shutdown()
               thread.join()
-
-          payload = json.loads(result.stdout)
-          assert payload["installed_version"] == "module-v1.0.0"
-          assert payload["latest_release"] == "module-v1.3.0"
-          assert payload["update_available"] is True
 
           verify_result = subprocess.run(
             [
@@ -300,33 +329,4 @@ jobs:
           assert verify_payload["verified"] is True
           assert verify_payload["valid"] is True
           assert len(verify_payload["files"]) == 4
-
-          legacy_metadata_path = target_dir / ".kicad-release-automation-version-legacy.json"
-          legacy_metadata_path.write_text(
-            json.dumps(
-              {
-                "module_repo": "example/kicad-release-automation-module",
-                "installed_version": "module-v1.0.0",
-              }
-            ),
-            encoding="utf-8",
-          )
-
-          legacy_result = subprocess.run(
-            [
-              sys.executable,
-              str(helper_path),
-              "--metadata",
-              str(legacy_metadata_path),
-              "--api-base-url",
-              f"http://127.0.0.1:{port}",
-              "--json",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-          )
-          legacy_payload = json.loads(legacy_result.stdout)
-          assert legacy_payload["installed_version"] == "module-v1.0.0"
-          assert legacy_payload["update_available"] is True
           PY
