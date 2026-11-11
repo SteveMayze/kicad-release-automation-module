@@ -93,6 +93,7 @@ jobs:
           cmp "$TARGET_DIR/release-artifacts.json" "$TARGET_DIR/release-artifacts.json.before"
           test -f "$TARGET_DIR/.kicad-release-automation-version.json"
           test -f "$TARGET_DIR/scripts/check_release_automation_update.py"
+          test -f "$TARGET_DIR/scripts/find_kicad_cli.py"
 
           python3 - "$TARGET_DIR" <<'PY'
           import json
@@ -112,6 +113,7 @@ jobs:
           assert isinstance(managed_files, dict)
           assert "scripts/generate_release_artifacts.py" in managed_files
           assert "scripts/check_release_automation_update.py" in managed_files
+          assert "scripts/find_kicad_cli.py" in managed_files
           assert ".github/workflows/release-gerbers.yml" in managed_files
           for details in managed_files.values():
             assert isinstance(details, dict)
@@ -138,6 +140,52 @@ jobs:
             --release 1.2.3 \
             --dry-run
 
+          cp hardware/demo.kicad_pro hardware/demo-aux.kicad_pro
+          cp hardware/demo.kicad_pcb hardware/demo-aux.kicad_pcb
+
+          cat > release-artifacts-multi.json <<'JSON'
+          {
+            "defaults": {
+              "gerber": {
+                "include_layers": [
+                  "F.Cu",
+                  "In1.Cu",
+                  "In2.Cu",
+                  "B.Cu",
+                  "F.Paste",
+                  "B.Paste",
+                  "F.SilkS",
+                  "B.SilkS",
+                  "F.Mask",
+                  "B.Mask",
+                  "Edge.Cuts"
+                ]
+              }
+            },
+            "projects": [
+              {
+                "id": "demo-main",
+                "path": "hardware/demo.kicad_pro"
+              },
+              {
+                "id": "demo-aux",
+                "path": "hardware/demo-aux.kicad_pro"
+              }
+            ]
+          }
+          JSON
+
+          python3 scripts/generate_release_artifacts.py \
+            --config release-artifacts-multi.json \
+            --release 1.2.3 \
+            --project-id demo-aux \
+            --dry-run
+
+          python3 scripts/generate_release_artifacts.py \
+            --config release-artifacts-multi.json \
+            --release demo-aux/1.2.3 \
+            --dry-run
+
           python3 - <<'PY'
           import importlib.util
           import os
@@ -149,11 +197,11 @@ jobs:
           assert spec is not None and spec.loader is not None
           spec.loader.exec_module(mod)
 
-          assert mod.windows_to_wsl_path(r"D:\\pcbs\\board.kicad_pro") == "/mnt/d/pcbs/board.kicad_pro"
+          assert mod.windows_to_wsl_path(r"D:\pcbs\board.kicad_pro") == "/mnt/d/pcbs/board.kicad_pro"
 
           os.environ["WSL_DISTRO_NAME"] = "UnitTest"
           converted = mod.normalize_user_path(
-            r"D:\\pcbs\\board.kicad_pro",
+            r"D:\pcbs\board.kicad_pro",
             Path.cwd(),
             context="unit-test",
           )
@@ -162,7 +210,7 @@ jobs:
           assert mod.format_path_for_cli(Path("/mnt/d/pcbs/board.kicad_pro"), True) == r"D:\pcbs\board.kicad_pro"
 
           try:
-            mod.normalize_user_path(r"\\\\server\\share\\board.kicad_pro", Path.cwd(), context="unit-test")
+            mod.normalize_user_path(r"\\server\share\board.kicad_pro", Path.cwd(), context="unit-test")
           except SystemExit:
             pass
           else:
@@ -226,14 +274,43 @@ jobs:
                 capture_output=True,
                 text=True,
               )
+
+              payload = json.loads(result.stdout)
+              assert payload["installed_version"] == "module-v1.0.0"
+              assert payload["latest_release"] == "module-v1.3.0"
+              assert payload["update_available"] is True
+
+              legacy_metadata_path = target_dir / ".kicad-release-automation-version-legacy.json"
+              legacy_metadata_path.write_text(
+                json.dumps(
+                  {
+                    "module_repo": "example/kicad-release-automation-module",
+                    "installed_version": "module-v1.0.0",
+                  }
+                ),
+                encoding="utf-8",
+              )
+
+              legacy_result = subprocess.run(
+                [
+                  sys.executable,
+                  str(helper_path),
+                  "--metadata",
+                  str(legacy_metadata_path),
+                  "--api-base-url",
+                  f"http://127.0.0.1:{port}",
+                  "--json",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+              )
+              legacy_payload = json.loads(legacy_result.stdout)
+              assert legacy_payload["installed_version"] == "module-v1.0.0"
+              assert legacy_payload["update_available"] is True
             finally:
               server.shutdown()
               thread.join()
-
-          payload = json.loads(result.stdout)
-          assert payload["installed_version"] == "module-v1.0.0"
-          assert payload["latest_release"] == "module-v1.3.0"
-          assert payload["update_available"] is True
 
           verify_result = subprocess.run(
             [
@@ -251,34 +328,5 @@ jobs:
           verify_payload = json.loads(verify_result.stdout)
           assert verify_payload["verified"] is True
           assert verify_payload["valid"] is True
-          assert len(verify_payload["files"]) == 3
-
-          legacy_metadata_path = target_dir / ".kicad-release-automation-version-legacy.json"
-          legacy_metadata_path.write_text(
-            json.dumps(
-              {
-                "module_repo": "example/kicad-release-automation-module",
-                "installed_version": "module-v1.0.0",
-              }
-            ),
-            encoding="utf-8",
-          )
-
-          legacy_result = subprocess.run(
-            [
-              sys.executable,
-              str(helper_path),
-              "--metadata",
-              str(legacy_metadata_path),
-              "--api-base-url",
-              f"http://127.0.0.1:{port}",
-              "--json",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-          )
-          legacy_payload = json.loads(legacy_result.stdout)
-          assert legacy_payload["installed_version"] == "module-v1.0.0"
-          assert legacy_payload["update_available"] is True
+          assert len(verify_payload["files"]) == 4
           PY

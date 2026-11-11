@@ -53,9 +53,18 @@ chmod +x uninstall.sh
 Before creating a target project release tag, run local checks in the target repository:
 
 ```bash
+# Preferred explicit form for a selected project
 python3 scripts/generate_release_artifacts.py \
 	--config release-artifacts.json \
+	--project-id ZAM-AdventStar-SixPoint \
 	--release 0.0.0 \
+	--dry-run \
+	--no-update-release-variable
+
+# Compatibility shorthand: project-id/semver is also accepted
+python3 scripts/generate_release_artifacts.py \
+	--config release-artifacts.json \
+	--release ZAM-AdventStar-SixPoint/0.0.0 \
 	--dry-run \
 	--no-update-release-variable
 ```
@@ -65,6 +74,22 @@ Recommended validation sequence:
 1. Re-run `install.sh` from the desired module version in this repository.
 2. Run the dry-run command above in the target repository.
 3. If dry-run output is correct, run a non-dry-run execution locally (requires `kicad-cli`) or push a release tag and let CI generate deliverables.
+
+## Locate KiCad CLI
+
+If `kicad-cli` is not on your PATH, the quickest check is:
+
+```bash
+python3 scripts/find_kicad_cli.py
+```
+
+On WSL, this also scans the common Windows KiCad install paths under `/mnt/c/Program Files/...` and `/mnt/c/Program Files (x86)/...`.
+
+To use the discovered path explicitly, export it before running the release script:
+
+```bash
+export KICAD_CLI="$(python3 scripts/find_kicad_cli.py)"
+```
 
 ## Check for module updates
 
@@ -97,35 +122,52 @@ Update available: yes
 
 Edit `release-artifacts.json` in the target project:
 
-- `project.path`: path to the target `.kicad_pro`
-- `gerber.include_layers`: layers to export
-- `gerber.additional_files`: optional extra files copied into the root of the Gerber output directory and ZIP
+- Legacy single-project mode (still supported):
+  - `project.path`: path to the target `.kicad_pro`
+  - `gerber.include_layers`: layers to export
+  - `gerber.additional_files`: optional extra files copied into the root of the Gerber output directory and ZIP
+- Multi-project mode:
+  - `projects[]`: list of projects with `id` and `path`
+  - `defaults.gerber`: shared Gerber config applied to each project unless overridden
+  - `projects[].gerber`: per-project Gerber overrides
 
 Example:
 
 ```json
 {
-	"project": {
-		"path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
-	},
-	"gerber": {
-		"include_layers": [
-			"F.Cu",
-			"In1.Cu",
-			"In2.Cu",
-			"B.Cu",
-			"F.Paste",
-			"B.Paste",
-			"F.SilkS",
-			"B.SilkS",
-			"F.Mask",
-			"B.Mask",
-			"Edge.Cuts"
-		],
-		"additional_files": [
-			"fab/uv-silkscreen-front.png"
-		]
-	}
+  "defaults": {
+    "gerber": {
+      "include_layers": [
+        "F.Cu",
+        "In1.Cu",
+        "In2.Cu",
+        "B.Cu",
+        "F.Paste",
+        "B.Paste",
+        "F.SilkS",
+        "B.SilkS",
+        "F.Mask",
+        "B.Mask",
+        "Edge.Cuts"
+      ],
+      "additional_files": []
+    }
+  },
+  "projects": [
+    {
+      "id": "atmega1608-dev",
+      "path": "kicad/ATMega1608_Dev/ATMega1608_Dev.kicad_pro"
+    },
+    {
+      "id": "lps-power-2",
+      "path": "kicad/lps-power-4-layer/lps-power-2.kicad_pro",
+      "gerber": {
+        "additional_files": [
+          "fab/lps-power-2-note.txt"
+        ]
+      }
+    }
+  ]
 }
 ```
 
@@ -141,10 +183,18 @@ Example:
 
 ## Release behavior in target project
 
-For tag `r1.3.1` and project `MyBoard`, workflow output names are:
+Tag conventions:
 
-- ZIP: `MyBoard-gerber-r1.3.1.zip`
-- Workflow artifact: `MyBoard-gerber-r1.3.1`
+- Legacy single-project release tag: `r#.#.#` (example: `r1.3.1`)
+- Targeted multi-project release tag: `r/<project-id>/#.#.#` (example: `r/atmega1608-dev/1.3.1`)
+- Manual runs can also use `workflow_dispatch` input `project_ids` (comma-separated).
+
+Behavior:
+
+- Plain `r#.#.#` tags are valid only for legacy single-project config (`project.path`).
+- Multi-project config must use targeted tag format or workflow_dispatch `project_ids`.
+- Each selected project produces a ZIP named `<project-id>-gerber-r#.#.#.zip`.
+- In multi-project mode, each project exports into its own output folder under `gerber/<project-id>/`.
 
 ## Notes
 
@@ -154,7 +204,7 @@ For tag `r1.3.1` and project `MyBoard`, workflow output names are:
 ## Module versioning and releases
 
 - Module releases use tags in `module-v#.#.#` format.
-- Target KiCad project releases remain `r#.#.#`.
+- Target KiCad project releases use `r#.#.#` (legacy single-project) or `r/<project-id>/#.#.#` (targeted multi-project).
 - Target projects update manually by checking out/pulling the desired module version, then re-running `install.sh`.
 - Target projects can query the latest available module release locally with `scripts/check_release_automation_update.py`.
 - Automatic target-repo upgrade bots are intentionally out of scope for now.

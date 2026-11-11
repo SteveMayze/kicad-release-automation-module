@@ -7,6 +7,7 @@ TARGET_DIR="${1:-$PWD}"
 WORKFLOW_REL_PATH=".github/workflows/release-gerbers.yml"
 SCRIPT_REL_PATH="scripts/generate_release_artifacts.py"
 UPDATE_CHECK_SCRIPT_REL_PATH="scripts/check_release_automation_update.py"
+CLI_HELPER_REL_PATH="scripts/find_kicad_cli.py"
 CONFIG_REL_PATH="release-artifacts.json"
 METADATA_REL_PATH=".kicad-release-automation-version.json"
 
@@ -90,6 +91,7 @@ write_metadata_file() {
   local installed_at
   local script_sha
   local helper_sha
+  local cli_helper_sha
   local workflow_sha
 
   module_version="$(resolve_module_version)"
@@ -98,6 +100,7 @@ write_metadata_file() {
   installed_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   script_sha="$(compute_sha256 "$TARGET_DIR/$SCRIPT_REL_PATH")"
   helper_sha="$(compute_sha256 "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH")"
+  cli_helper_sha="$(compute_sha256 "$TARGET_DIR/$CLI_HELPER_REL_PATH")"
   workflow_sha="$(compute_sha256 "$TARGET_DIR/$WORKFLOW_REL_PATH")"
 
   cat > "$TARGET_DIR/$METADATA_REL_PATH" <<EOF
@@ -117,6 +120,11 @@ write_metadata_file() {
     "scripts/check_release_automation_update.py": {
       "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
       "sha256": $(printf '%s' "$helper_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    },
+    "scripts/find_kicad_cli.py": {
+      "version": $(printf '%s' "$module_version" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+      "sha256": $(printf '%s' "$cli_helper_sha" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
       "installed_at": $(printf '%s' "$installed_at" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
     },
     ".github/workflows/release-gerbers.yml": {
@@ -156,6 +164,8 @@ cp "$SCRIPT_DIR/scripts/generate_release_artifacts.py" \
   "$TARGET_DIR/$SCRIPT_REL_PATH"
 cp "$SCRIPT_DIR/scripts/check_release_automation_update.py" \
   "$TARGET_DIR/$UPDATE_CHECK_SCRIPT_REL_PATH"
+cp "$SCRIPT_DIR/scripts/find_kicad_cli.py" \
+  "$TARGET_DIR/$CLI_HELPER_REL_PATH"
 
 if [[ ! -f "$TARGET_DIR/$CONFIG_REL_PATH" ]]; then
   cp "$SCRIPT_DIR/examples/release-artifacts.json" "$TARGET_DIR/$CONFIG_REL_PATH"
