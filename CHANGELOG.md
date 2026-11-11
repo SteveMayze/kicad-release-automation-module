@@ -23,6 +23,7 @@ The format is inspired by Keep a Changelog, and this project follows semantic ve
 - Expanded installer metadata to schema v2 with managed-file versions and SHA256 checksums.
 - Updated workflow packaging to emit one Gerber ZIP per selected project in multi-project mode.
 - Kept plain `r#.#.#` tags in legacy single-project mode only when `project.path` config is used.
+- Workflow template now runs `kicad-cli` from the official KiCad container image (`KICAD_IMAGE`, default `kicad/kicad:10.0`) through a shim, replacing the AppImage download and the `PATH` lookup step.
 
 ### Fixed
 - Fixed mixed-platform path handling so Windows drive-letter paths work under WSL for configured project/additional file paths.

@@ -19,6 +19,9 @@ on:
 permissions:
   contents: write
 
+env:
+  KICAD_IMAGE: kicad/kicad:10.0
+
 jobs:
   build-gerbers:
     runs-on: ubuntu-latest
@@ -29,60 +32,79 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install KiCad CLI from official stable binary
+      - name: Set up KiCad CLI (container)
         shell: bash
         run: |
           set -euo pipefail
 
-          # The GitHub-hosted Ubuntu runner image is not reliable for apt-based KiCad
-          # installs because the runner's custom mirror configuration can still point at
-          # a broken mirror even after repository fixes. Use KiCad's own stable binary
-          # distribution instead of the OS package manager to keep the workflow reliable.
-          mkdir -p /tmp/kicad
-          cd /tmp/kicad
-
-          URL="https://downloads.kicad.org/kicad/linux/explore/stable"
-          echo "Fetching KiCad stable download metadata from $URL"
-          curl -fsSL "$URL" -o /tmp/kicad-stable.html
-
-          # Prefer the full stable AppImage tarball published by KiCad.
-          APPIMAGE_URL="$(grep -oE 'https://[^\" ]+kicad-[0-9]+\.[0-9]+\.[0-9]+.*\.AppImage\.tar' /tmp/kicad-stable.html | head -n 1 || true)"
-          if [ -z "$APPIMAGE_URL" ]; then
-            echo "Unable to determine official KiCad stable AppImage URL." >&2
+          # kicad-cli runs from the official KiCad container image through a small
+          # shim, so the job itself stays on the hosted runner. The workspace is
+          # mounted at the same absolute path inside the container, which keeps the
+          # absolute paths passed by generate_release_artifacts.py valid.
+          PULLED=0
+          for ATTEMPT in 1 2 3; do
+            if docker pull "$KICAD_IMAGE"; then
+              PULLED=1
+              break
+            fi
+            if [[ "$ATTEMPT" -lt 3 ]]; then
+              DELAY=$((ATTEMPT * 15))
+              echo "docker pull attempt $ATTEMPT failed; retrying in ${DELAY}s" >&2
+              sleep "$DELAY"
+            fi
+          done
+          if [[ "$PULLED" -ne 1 ]]; then
+            echo "Could not pull KiCad image '$KICAD_IMAGE' after 3 attempts." >&2
             exit 1
           fi
 
-          echo "Downloading KiCad stable binary from $APPIMAGE_URL"
-          curl -fL --retry 3 --retry-delay 5 "$APPIMAGE_URL" -o /tmp/kicad-stable.tar
-          tar -xf /tmp/kicad-stable.tar -C /tmp/kicad --strip-components=1
+          # Diagnostic: an entrypoint other than null would receive "kicad-cli" as
+          # an argument instead of running it.
+          echo "Image entrypoint/cmd:"
+          docker inspect --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' "$KICAD_IMAGE"
 
-          CLI_PATH="$(find /tmp/kicad -type f \( -name kicad-cli -o -name kicad-cli.exe \) | head -n 1)"
-          if [ -z "$CLI_PATH" ]; then
-            echo "kicad-cli not found in downloaded KiCad bundle." >&2
+          KICAD_HOME="$RUNNER_TEMP/kicad-home"
+          BIN_DIR="$RUNNER_TEMP/kicad-bin"
+          SHIM="$BIN_DIR/kicad-cli"
+          mkdir -p "$KICAD_HOME" "$BIN_DIR"
+
+          # Image, workspace and home are baked in now; $PWD and "$@" are evaluated
+          # each time the shim runs.
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'set -euo pipefail'
+            printf 'KICAD_IMAGE=%q\n' "$KICAD_IMAGE"
+            printf 'KICAD_WORKSPACE=%q\n' "$GITHUB_WORKSPACE"
+            printf 'KICAD_HOME=%q\n' "$KICAD_HOME"
+            echo 'exec docker run --rm --user "$(id -u):$(id -g)" -e HOME="$KICAD_HOME" -v "$KICAD_HOME:$KICAD_HOME" -v "$KICAD_WORKSPACE:$KICAD_WORKSPACE" -w "$PWD" "$KICAD_IMAGE" kicad-cli "$@"'
+          } > "$SHIM"
+          chmod +x "$SHIM"
+
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          echo "KICAD_CLI=$SHIM" >> "$GITHUB_ENV"
+
+          VERSION_OUTPUT="$("$SHIM" --version)"
+          if [[ -z "$VERSION_OUTPUT" ]]; then
+            echo "kicad-cli --version produced no output from image '$KICAD_IMAGE'." >&2
             exit 1
           fi
+          echo "Using KiCad CLI shim at: $SHIM"
+          echo "kicad-cli version: $VERSION_OUTPUT"
 
-          echo "KICAD_CLI=$CLI_PATH" >> "$GITHUB_ENV"
-          echo "Using KiCad CLI at: $CLI_PATH"
-          "$CLI_PATH" --version
-
-      - name: Resolve kicad-cli path
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if command -v kicad-cli >/dev/null 2>&1; then
-            CLI_PATH="$(command -v kicad-cli)"
-          elif command -v kicad-cli-nightly >/dev/null 2>&1; then
-            CLI_PATH="$(command -v kicad-cli-nightly)"
-          else
-            echo "kicad-cli executable not found after installation." >&2
+          # Diagnostics: the container must be able to write to its HOME and to the
+          # workspace as the runner user, and files it creates must be owned by it.
+          PROBE="$GITHUB_WORKSPACE/.kicad-cli-probe"
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME="$KICAD_HOME" \
+            -v "$KICAD_HOME:$KICAD_HOME" -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            -w "$GITHUB_WORKSPACE" "$KICAD_IMAGE" \
+            sh -c 'touch "$HOME/.probe" "$1"' sh "$PROBE"
+          PROBE_OWNER="$(stat -c '%u:%g' "$PROBE")"
+          rm -f "$PROBE" "$KICAD_HOME/.probe"
+          echo "Container-written file owner: $PROBE_OWNER (runner: $(id -u):$(id -g))"
+          if [[ "$PROBE_OWNER" != "$(id -u):$(id -g)" ]]; then
+            echo "Files written by the KiCad container are not owned by the runner user." >&2
             exit 1
           fi
-
-          echo "KICAD_CLI=$CLI_PATH" >> "$GITHUB_ENV"
-          echo "Using KiCad CLI at: $CLI_PATH"
-          "$CLI_PATH" --version
 
       - name: Resolve release context
         id: rel
