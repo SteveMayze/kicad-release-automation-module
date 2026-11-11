@@ -29,19 +29,42 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install KiCad CLI
+      - name: Install KiCad CLI from official stable binary
+        shell: bash
         run: |
           set -euo pipefail
 
-          # The Launchpad nightly PPA is unreliable in GitHub-hosted runners because it
-          # frequently fails DNS/Launchpad connectivity. Use the Ubuntu package repo,
-          # which is much more stable for CI and still provides kicad-cli for gerber export.
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends kicad
+          # The GitHub-hosted Ubuntu runner image is not reliable for apt-based KiCad
+          # installs because the runner's custom mirror configuration can still point at
+          # a broken mirror even after repository fixes. Use KiCad's own stable binary
+          # distribution instead of the OS package manager to keep the workflow reliable.
+          mkdir -p /tmp/kicad
+          cd /tmp/kicad
 
-          if ! command -v kicad-cli >/dev/null 2>&1; then
-            sudo apt-get install --yes --no-install-recommends kicad-cli
+          URL="https://downloads.kicad.org/kicad/linux/explore/stable"
+          echo "Fetching KiCad stable download metadata from $URL"
+          curl -fsSL "$URL" -o /tmp/kicad-stable.html
+
+          # Prefer the full stable AppImage tarball published by KiCad.
+          APPIMAGE_URL="$(grep -oE 'https://[^\" ]+kicad-[0-9]+\.[0-9]+\.[0-9]+.*\.AppImage\.tar' /tmp/kicad-stable.html | head -n 1 || true)"
+          if [ -z "$APPIMAGE_URL" ]; then
+            echo "Unable to determine official KiCad stable AppImage URL." >&2
+            exit 1
           fi
+
+          echo "Downloading KiCad stable binary from $APPIMAGE_URL"
+          curl -fL --retry 3 --retry-delay 5 "$APPIMAGE_URL" -o /tmp/kicad-stable.tar
+          tar -xf /tmp/kicad-stable.tar -C /tmp/kicad --strip-components=1
+
+          CLI_PATH="$(find /tmp/kicad -type f \( -name kicad-cli -o -name kicad-cli.exe \) | head -n 1)"
+          if [ -z "$CLI_PATH" ]; then
+            echo "kicad-cli not found in downloaded KiCad bundle." >&2
+            exit 1
+          fi
+
+          echo "KICAD_CLI=$CLI_PATH" >> "$GITHUB_ENV"
+          echo "Using KiCad CLI at: $CLI_PATH"
+          "$CLI_PATH" --version
 
       - name: Resolve kicad-cli path
         shell: bash
