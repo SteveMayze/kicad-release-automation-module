@@ -23,7 +23,7 @@ Provide reusable KiCad release automation as a standalone module repository.
 - [x] Run `kicad-cli` from the official KiCad container image in target CI (shim, no runner install).
 - [x] Package release ZIPs from a per-run manifest; add `dry_run` workflow input.
 - [x] Exercise a real `kicad-cli` in module CI with KiCad 9 and KiCad 10 fixture boards; lint workflows with `actionlint`.
-- [ ] Roll the container-based workflow out to installed targets and confirm one tagged release per project.
+- [x] Roll the container-based workflow out to installed targets and confirm one tagged release per project (first target on `module-v0.3.0`).
 - [ ] Add optional DRC/ERC gate examples.
 - [ ] Add module release notes quality gates (breaking-change checklist).
 - [ ] Add optional target update-check template workflow (PR-only, manual merge).
